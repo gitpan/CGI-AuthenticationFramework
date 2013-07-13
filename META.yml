@@ -1,0 +1,25 @@
+--- #YAML:1.0
+name:               CGI-AuthenticationFramework
+version:            0.01
+abstract:           A CGI authentication framework that utilizes mySQL for the user and session management
+author:
+    - Phil Massyn <phil@massyn.net>
+license:            perl
+distribution_type:  module
+configure_requires:
+    ExtUtils::MakeMaker:  0
+build_requires:
+    ExtUtils::MakeMaker:  0
+requires:
+    Auth::Yubikey_WebClient:  1
+    CGI::Cookie:          1
+    Digest::MD5:          1
+    Test::More:           0
+no_index:
+    directory:
+        - t
+        - inc
+generated_by:       ExtUtils::MakeMaker version 6.57_05
+meta-spec:
+    url:      http://module-build.sourceforge.net/META-spec-v1.4.html
+    version:  1.4
