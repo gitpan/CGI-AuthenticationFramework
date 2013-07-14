@@ -6,8 +6,9 @@ use warnings;
 use CGI;					# obvious CGI operations
 use CGI::Cookie;				# to handle the cookies
 use CGI::Pretty;
-use Digest::MD5  qw(md5 md5_hex md5_base64);	# to encrypt the password
+use Digest::MD5  qw(md5 md5_hex md5_base64);	# to encrypt the session key
 use Auth::Yubikey_WebClient;			# for Yubikey support
+use Net::SMTP;					# to send registration & password reminder emails
 
 =head1 NAME
 
@@ -15,11 +16,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 =head1 SYNOPSIS
 
@@ -59,7 +60,7 @@ Sample CGI script :-
 	
 	print "<p>\n";
 	print "This is the secret message.<br>\n";
-	print "Username is $sec->{username}<br>\n";
+	print "Email Address is $sec->{username}<br>\n";
 	print "Session ID is $sec->{session}<br>\n";
 	print "</p>";
 	print "<a href=\"#\">Me again</a>\n";
@@ -112,6 +113,29 @@ When you enable yubikey support, you have to set the yubi_id and yubi_api fields
 
 Defines the timeout before a user has to log on again.  Default is 600 seconds.
 
+=head4 register
+
+If you need users to register on their own, set the register option to 1.  Default is 0
+
+=head4 forgot
+
+If you need users to have the ability to reset their passwords by emailing a new one to them, set this option to 1.  Default is 0.
+=head4 SMTP server settings
+
+If you have register enabled, you need to specify SMTP settings
+
+=head5 smtpserver
+
+The hostname of the SMTP server
+
+=head5 smtpfrom
+
+The from email address to use when sending emails
+
+=head5 smtpuser , smtppass
+
+The smtpuser and smtppass parameters are optional.  If your SMTP server requires you to authenticate, set these two fields.
+
 =cut
 
 sub new
@@ -154,7 +178,27 @@ sub new
 	$self->{footer} = $options{footer} ? $options{footer} : $self->{cgi}->hr . $self->{cgi}->i('Powered by Perl') . $self->{cgi}->end_html;
 
 	# set the timeout field
-	$self->{timeout} = $options{timeout} ? $options{timeout} : 0;	
+	$self->{timeout} = $options{timeout} ? $options{timeout} : 600;	
+
+	# set the register field
+	$self->{register} = $options{register} ? $options{register} : 0;
+	$self->{forgot}   = $options{forgot}   ? $options{forgot}   : 0;
+
+	$self->{smtpserver} = $options{smtpserver} ? $options{smtpserver} : '';
+	$self->{smtpfrom}   = $options{smtpfrom}   ? $options{smtpfrom}   : '';
+
+	$self->{smtpuser}   = $options{smtpuser}   ? $options{smtpuser}   : '';
+	$self->{smtppass}   = $options{smtppass}   ? $options{smtppass}   : '';
+
+	if($self->{register} == 1 || $self->{forgot} == 1)
+	{
+		# if register or forget is set, we need smtpserver, smtpuser and smtppassword
+		if($self->{smtpserver} eq '')
+		{
+			die "You did not set smtpserver";
+		}
+	}
+	
 	# set the yubikey field
 	$self->{yubikey} = $options{yubikey} ? $options{yubikey} : 0;	
 	$self->{yubi_id} = $options{yubi_id} ? $options{yubi_id} : '';
@@ -201,6 +245,14 @@ sub secure
 	}
 	else
 	{
+		if($self->{cgi}->param('func') eq 'register')
+		{
+			$self->register();
+		}
+		if($self->{cgi}->param('func') eq 'forgot')
+		{
+			$self->forgot();
+		}
 		$self->login();
 	}
 }
@@ -233,6 +285,207 @@ sub header
 
 }
 
+sub forgot
+{
+	my ($self) = @_;
+
+	my $token = $self->{cgi}->param('token') 	? $self->{cgi}->param('token') 		: '';
+	my $user  = $self->{cgi}->param('username')  	? $self->{cgi}->param('username')	: ''; 
+
+	if($user eq '')
+	{
+		my $schema = "username,Email Address,text,40";
+
+		print $self->header();
+		$self->form($schema,'Reset your password','forgot','Reset your password');
+		$self->finish();
+	}
+	else
+	{
+		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 0');
+                if($sth->execute($user))
+                {
+                        my ($user2,$token2) = $sth->fetchrow_array();
+                        $self->{username} = $user2;
+                        $sth->finish();
+
+			if($user2 eq '')
+			{
+				$self->error("User does not exist");
+			}
+			else
+			{
+				if($token eq $token2 && $token ne '')
+				{
+					# we have a token, and it matches.  Reset the password, and mail it to the user to log in
+
+					my $sth = $self->{dbh}->prepare("update tbl_users set token = '', password = ? where username = ?");
+					my $newpass = $self->generate_password();
+					my $tokennew = $self->generate_token();
+
+                                	if($sth->execute($self->encrypt($newpass,$tokennew),$user2))
+					{
+						# On success, let's email it out
+
+						my $url = $self->{cgi}->url;
+						my $msg = "Your password has been reset to : $newpass\n\nPlease login at $url";
+						$self->send_email($self->{smtpfrom},$user2,"Password has been reset",$msg);
+						$self->message("Your password has been reset, and mailed to your email address.");
+					}
+					else
+					{
+						$self->error("Could not reset the password : " . $DBI::errstr);
+					}
+
+
+				}
+                                elsif($token eq '')
+                                {
+                                        # Generate a new token, and mail it to the user to click
+
+                                        my $new_token = $self->generate_token();
+
+					my $sth = $self->{dbh}->prepare('update tbl_users set token = ? where username = ?');
+					if($sth->execute($new_token,$user2))
+					{
+						# new token set, now main a link to the user
+						my $url = $self->{cgi}->url . "?func=forgot&username=$user2&token=$new_token";
+
+						my $msg = "To reset your password, click here : $url.\n\nIf you did not send this message, ignore it";
+						$self->send_email($self->{smtpfrom},$user2,"Reset your password",$msg);
+
+						$self->message("Check your email for the password reset link");
+					
+					}
+					else
+					{
+						$self->error("can not create new token : " . $DBI::errstr);
+					}
+
+                                }
+				else
+				{
+					$self->error("Invalid token to reset the password");
+				}
+			}
+		}
+		else
+		{
+			$self->error($DBI::errstr);
+		}
+	}
+}
+
+sub register
+{
+	my ($self) = @_;
+
+	# this function only works if the developer wanted registration to be enabled
+	if($self->{register} != 1)
+	{
+		return;
+	}
+
+	my $user  = $self->{cgi}->param('username');
+	my $token = $self->{cgi}->param('token');
+
+	$self->{username} = $user;
+
+	if($user eq '')
+	{
+		my $schema = "username,Email Address,text,20";
+		print $self->header();
+		$self->form($schema,"Register a new account","register","New user registration");
+		$self->finish();
+	}
+	else
+	{
+		# we got a user name...
+	
+		# is it an actual email address?
+		if(!$self->valid_email($user))	
+		{
+			$self->error("The provided email address is not a valid email address.");
+		}
+
+		# do we already have one of these ?
+		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 1');
+		if($sth->execute($user))
+		{
+			my ($user2,$token2) = $sth->fetchrow_array();
+			$self->{username} = $user2;
+			$sth->finish();
+
+			if($user2 ne '')
+			{
+				if($token2 eq '')
+				{
+					$self->log('register','Account already exists.');
+					$self->error('The user account already exists.  Please select another.');
+				}
+				else
+				{
+					if($token2 ne $token)
+					{
+						$self->log('register','Provided token does not validate.');
+						$self->error("The token provided does not validate.");
+					}
+					else
+					{
+						# Everything checks out... Enable the account
+						my $sth = $self->{dbh}->prepare("update tbl_users set token = '',state = 0 where username = ?");
+						if($sth->execute($user2))
+						{
+							$self->log('register','User has been validated');
+							$self->message("Account has been validated.  You can now log on.");
+						}
+						else
+						{
+							$self->log('register','Unable to validate the user');
+							$self->error("Unable to validate account : " . $DBI::errstr);
+						}
+					}
+				}
+			}
+			else
+			{
+				# The user does not exist yet
+				my $sth = $self->{dbh}->prepare('insert into tbl_users (username,password,token,state) values(?,?,?,1)');
+				
+				my $newpass = $self->generate_password();
+
+				my $tokennew = $self->generate_token();
+
+				if($sth->execute($user,$self->encrypt($newpass),$tokennew))
+				{
+					$self->log('register','New user registered.');
+					my $url = $self->{cgi}->url . "?func=register&username=$user&token=$tokennew";
+
+					my $body = "Your account has been setup.  To activate your account, click this link - $url\n\nYour password is : $newpass\n\nYou can change the password once you have logged on.";
+					$self->send_email($self->{smtpfrom},$user,"New user Registration",$body);
+					$self->message("Registration token sent.  Please check your email.");
+				}
+				else
+				{
+					$self->error("Can not create a registration token : " . $DBI::errstr);
+				}
+
+			}
+		}
+		else
+		{
+			$self->error("Can not check if user exists : " . $DBI::errstr);
+		}
+	}
+}
+
+sub generate_token
+{
+	my ($self) = @_;
+
+	return md5_hex(time . $ENV{REMOTE_ADDR} . $$ * rand(10000000));
+}
+
 sub logout
 {
 	my ($self) = @_;
@@ -246,10 +499,8 @@ sub change_password
 {
 	my ($self) = @_;
 
-	# we encrypt the password as soon as it hits us.  We don't want to pass unencrypted passwords
-	# through the system
-	my $pass1 = $self->{cgi}->param('pass1') ? $self->encrypt($self->{cgi}->param('pass1')) : '';
-	my $pass2 = $self->{cgi}->param('pass2') ? $self->encrypt($self->{cgi}->param('pass2')) : '';
+	my $pass1 = $self->{cgi}->param('pass1') ? $self->{cgi}->param('pass1') : '';
+	my $pass2 = $self->{cgi}->param('pass2') ? $self->{cgi}->param('pass2') : '';
 
 	if($pass1 eq '' || $pass2 eq '')
 	{
@@ -264,15 +515,17 @@ sub change_password
 		{
 			$self->error("The two passwords do not match.");
 		}
+
 		# are they long enough ?
 		if(length($pass1) <= 7)
 		{
 			$self->error("The password you chose is not long enough.");
 		}
-		if($self->{dbh}->do("update tbl_users set password = ? where username = ?",undef,$pass1,$self->{username}))
+
+		if($self->{dbh}->do("update tbl_users set password = ? where username = ?",undef,$self->encrypt($pass1),$self->{username}))
 		{
 			$self->log('password','User has successfully changed their password');
-			$self->error("Password changed");
+			$self->message("Password changed");
 		}
 		else
 		{
@@ -301,7 +554,7 @@ sub login_form
 
 	# Fieldname,Description,type,size
 	my $schema = <<SCHEMA
-username,Username,text,30
+username,Email Address,text,30
 password,Password,password,50
 SCHEMA
 ;
@@ -310,6 +563,15 @@ SCHEMA
 		$schema .= "yubiotp,Yubikey,password,50";
 	}
 	$self->form($schema,"Login","login","Login here");
+
+	if($self->{register} == 1)
+	{
+		print $cgi->a({href=>"?func=register"},"Register");
+	}
+	if($self->{forgot} == 1)
+	{
+		print $cgi->a({href=>"?func=forgot"},"Forgot password");
+	}
 }
 
 sub read_login_form
@@ -355,7 +617,7 @@ sub session_create
 	my ($self) = @_;
 
 	# create a new session key.. hopefully random enough..
-	$self->{session} = $self->encrypt(time . $ENV{REMOTE_ADDR} . $$ . rand(1000));
+	$self->{session} = $self->generate_token();
 
 	# delete any old sessions for this user (if they should exist)
 	$self->{dbh}->do('delete from tbl_session where username=?',undef,$self->{username});
@@ -405,13 +667,17 @@ sub authenticate
 {
 	my ($self,$user,$pass,$yubi) = @_;
 
-	my $sth = $self->{dbh}->prepare('select username,yubikey from tbl_users where username = ? and password = ?');
+	my $sth = $self->{dbh}->prepare('select username,yubikey,password from tbl_users where username = ? and state = 0');
 
-	if($sth->execute($user,$self->encrypt($pass)))
+	if($sth->execute($user))
 	{
-		my ($u,$y) = $sth->fetchrow_array();
-
+		my ($u,$y,$p) = $sth->fetchrow_array();
 		$sth->finish();
+
+		if(crypt($pass,$p) ne $p)
+		{
+			$self->error("Access denied");
+		}
 
 		if(lc($u) eq lc($user))
 		{
@@ -489,9 +755,22 @@ sub authenticate
 	return 0;
 }
 
+sub message
+{
+        my ($self,$text) = @_;
+
+        $self->log('message',$text);
+
+        print $self->header();
+        print $self->{cgi}->h3($text);
+        $self->finish();
+
+}
 sub error
 {
 	my ($self,$text) = @_;
+
+	$self->log('error',$text);
 
 	print $self->header();
 	print $self->{cgi}->h3($text);
@@ -568,6 +847,8 @@ Call this module once to setup the database tables.  Running it multiple times w
 
 It will create the tables tbl_users, tbl_session, and tbl_logs.
 
+It will also create the default user 'admin', with it's password 'password'.  Remember to change this password on your first logon.
+
 =cut
 
 sub setup_database
@@ -578,7 +859,7 @@ sub setup_database
 	#
 	if(!$self->{dbh}->do('select 1 from tbl_users'))
 	{
-		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200))'))
+		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0)'))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -624,7 +905,7 @@ sub encrypt
 {
 	my ($self,$input) = @_;
 
-	return md5_hex($input);
+	return crypt($input,$self->generate_token());
 }
 
 sub log
@@ -639,21 +920,90 @@ sub log
 
 }
 
+sub generate_password
+{
+	my ($self) = @_;
+
+	my $cs = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+	my $pass;
+	for(my $k=0;$k<8;$k++)
+	{
+		my $ch = int(rand(length($cs)));
+		$pass .= substr($cs,$ch,1);
+	}
+	return $pass;
+}
+
+sub send_email
+{
+        my ($self,$from,$to,$subject,$body) = @_;
+
+        my $smtp = Net::SMTP->new(
+                $self->{smtpserver},
+                Hello => $self->{smtpserver},
+                Timeout => 60
+        ) || $self->error("Could not connect to mail server : $!");
+
+	# TO BE TESTED...
+	if($self->{smtpuser} ne '' && $self->{smtppass} ne '')
+	{
+		$smtp->auth($self->{smtpuser},$self->{smtppass}) || $self->error("Could not authenticate to mail server : $!");
+	}
+
+        $smtp->mail($from);
+        $smtp->recipient($to);
+        $smtp->to($to);
+
+        $smtp->data;
+
+        $smtp->datasend("From: $from\n");
+        $smtp->datasend("To: $to\n");
+        $smtp->datasend("Subject: $subject\n");
+        $smtp->datasend("\n");
+
+        $smtp->datasend($body);
+
+        $smtp->dataend;
+        $smtp->quit;
+}
+
+sub valid_email
+{
+	my ($self,$in) = @_;
+
+	# the regex doesn't cater for many domains... need to simplify it for now..
+
+#	if($in =~ /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b/i)
+	if($in =~ /.+\@.+/)
+	{
+		return 1;
+	}
+	else
+	{
+		return 0;
+	}
+}
 =head1 AUTHOR
 
 Phil Massyn, C<< <phil at massyn.net> >>
 
-=head TODO
+=head1 REVISION
+
+0.02	Added registration option (including Net::SMTP)
+	Changed password encryption to a salted hash
+	Added forgotten password option
+	Logging all messages being displayed
+
+0.01	Initial version
+
+=head1 TODO
 
 There is still plenty to do.
 
-=item User automated registration
-
-=item User forgot password
-
 =item User lost a yubikey
 
-=item User Administration and mode
+=item User Administration and user maintenance console
 
 =head1 BUGS
 
