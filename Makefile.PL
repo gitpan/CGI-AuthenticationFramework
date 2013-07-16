@@ -17,7 +17,8 @@ WriteMakefile(
 	'Auth::Yubikey_WebClient'	=> 1,
 	'Digest::MD5'			=> 1,
 	'CGI::Cookie'			=> 1,
-	'Net::SMTP'			=> 1
+	'Net::SMTP'			=> 1,
+	'Captcha::reCAPTCHA'		=> 1
     },
     dist                => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean               => { FILES => 'CGI-AuthenticationFramework-*' },

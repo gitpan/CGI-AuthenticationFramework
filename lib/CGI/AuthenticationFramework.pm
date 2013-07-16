@@ -9,6 +9,9 @@ use CGI::Pretty;
 use Digest::MD5  qw(md5 md5_hex md5_base64);	# to encrypt the session key
 use Auth::Yubikey_WebClient;			# for Yubikey support
 use Net::SMTP;					# to send registration & password reminder emails
+use POSIX qw(strftime);				# used for no-cache headers
+use Captcha::reCAPTCHA;				# the captcha module
+
 
 =head1 NAME
 
@@ -16,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.02
+Version 0.03
 
 =cut
 
-our $VERSION = '0.02';
+our $VERSION = '0.03';
 
 =head1 SYNOPSIS
 
@@ -53,7 +56,7 @@ Sample CGI script :-
 	
 	# == once we get through that, we can send our headers
 	print $sec->header();
-	
+
 	# == We can call some additional functions
 	print "<a href=\"?func=logout\">Logout</a>\n";
 	print "<a href=\"?func=password\">Change password</a>\n";
@@ -136,6 +139,12 @@ The from email address to use when sending emails
 
 The smtpuser and smtppass parameters are optional.  If your SMTP server requires you to authenticate, set these two fields.
 
+=head4 captcha
+
+Defined if you want to use a captcha.  Default is 0.
+
+Sign up for a free API from L<https://www.google.com/recaptcha/admin/create> and enter the values in captcha_public and captcha_private
+
 =cut
 
 sub new
@@ -211,6 +220,17 @@ sub new
 			die "You need to set the yubi_id field.  Obtain this from https://upgrade.yubico.com/getapikey/";
 		}
 	}
+
+	# Read the captcha variables
+	$self->{captcha}         = $options{captcha}         ? $options{captcha}         : 0;
+	if($self->{captcha} == 1)
+	{
+		$self->{captcha_public}  = $options{captcha_public}  ? $options{captcha_public}  : '';
+		$self->{captcha_private} = $options{captcha_private} ? $options{captcha_private} : '';
+		$self->{captcha_object} = Captcha::reCAPTCHA->new;
+
+	}
+
 	# Read the cookie
 	my %cookies = fetch CGI::Cookie;
 	if($cookies{$self->{cookie}})
@@ -281,6 +301,20 @@ sub header
 	}
 	$opts{Cookie} = $cookie;
 	$self->{_headersent} = 1;
+
+	# no cache
+	$opts{Pragma}		= 'no-cache';
+	$opts{Last_Modified}	= strftime('%a, %d %b %Y %H:%M:%S GMT', gmtime);
+	$opts{expires}		= 'Sat, 26 Jul 1997 05:00:00 GMT';
+	$opts{Cache_Control}	= join(', ', qw(
+        				private
+        				no-cache
+        				no-store
+        				must-revalidate
+        				max-age=0
+        				pre-check=0
+        				post-check=0
+    				));
 	return CGI::header({%opts}) . $self->{header};
 
 }
@@ -292,16 +326,33 @@ sub forgot
 	my $token = $self->{cgi}->param('token') 	? $self->{cgi}->param('token') 		: '';
 	my $user  = $self->{cgi}->param('username')  	? $self->{cgi}->param('username')	: ''; 
 
+	if($self->{forgot} != 1)
+	{
+		return 0;
+	}
+
+	if(!$self->validate_input("md5hex",$token))
+	{
+		return 0;
+	}
+	
 	if($user eq '')
 	{
 		my $schema = "username,Email Address,text,40";
 
 		print $self->header();
-		$self->form($schema,'Reset your password','forgot','Reset your password');
+		$self->form($schema,'Reset your password','forgot','Reset your password',$self->{captcha});
 		$self->finish();
 	}
 	else
 	{
+
+                # validate if the captcha is ok
+                if(!$self->validate_captcha())
+                {
+                        return 0;
+                }
+
 		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 0');
                 if($sth->execute($user))
                 {
@@ -395,15 +446,21 @@ sub register
 	{
 		my $schema = "username,Email Address,text,20";
 		print $self->header();
-		$self->form($schema,"Register a new account","register","New user registration");
+		$self->form($schema,"Register a new account","register","New user registration",$self->{captcha});
 		$self->finish();
 	}
 	else
 	{
 		# we got a user name...
-	
+
+		# validate if the captcha is ok
+		if(!$self->validate_captcha())
+		{
+			return 0;
+		}
+
 		# is it an actual email address?
-		if(!$self->valid_email($user))	
+		if(!$self->validate_input('email',$user))
 		{
 			$self->error("The provided email address is not a valid email address.");
 		}
@@ -432,6 +489,12 @@ sub register
 					}
 					else
 					{
+						# confirm that the incoming token was in fact a valid token
+						if(!$self->validate_input("md5hex",$token))
+						{
+							return 0;
+						}
+	
 						# Everything checks out... Enable the account
 						my $sth = $self->{dbh}->prepare("update tbl_users set token = '',state = 0 where username = ?");
 						if($sth->execute($user2))
@@ -643,6 +706,12 @@ sub session_valid
 {
 	my ($self) = @_;
 
+	# is the input session field actually a session ?
+	if(!$self->validate_input("md5hex",$self->{session}))
+	{
+		return 0;
+	}
+
 	# check if the session is still valid.  If it is, set the username and return 1
 	# if not, return 0
 
@@ -802,13 +871,14 @@ form (schema,submit text,hidden func field)
 
 sub form
 {
-	my ($self,$schema,$submit,$func,$title) = @_;
+	my ($self,$schema,$submit,$func,$title,$captcha) = @_;
 	
 	my $cgi = $self->{cgi};
 
 	print $cgi->h2($title);
-	print $cgi->start_table;
 	print $cgi->start_form({-action=>$cgi->url});;
+	print $cgi->start_table;
+
 	foreach my $f (split(/\n/,$schema))
 	{
 		chomp($f);
@@ -833,12 +903,20 @@ sub form
 			print $cgi->end_td;
 		print $cgi->end_Tr;
 	}
+
 	print $cgi->Tr($cgi->th("&nbsp;"),
 			$cgi->th($cgi->submit(-value=>$submit))
 			);
+
 	print $cgi->hidden(-name=>'func',-value=>$func,-override=>1);
-	print $cgi->end_form;
 	print $cgi->end_table;
+        if($captcha == 1)
+        {
+		print $self->{captcha_object}->get_html( $self->{captcha_public} );
+        }
+
+	print $cgi->end_form;
+
 }
 
 =head2 setup_database
@@ -968,14 +1046,59 @@ sub send_email
         $smtp->quit;
 }
 
-sub valid_email
+sub validate_captcha
 {
-	my ($self,$in) = @_;
+	my ($self) = @_;
 
-	# the regex doesn't cater for many domains... need to simplify it for now..
+	$self->log('captcha','DEBUG - entering');
 
-#	if($in =~ /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b/i)
-	if($in =~ /.+\@.+/)
+	if($self->{captcha} != 1)
+	{
+		return 1;
+	}
+	$self->log('captcha','DEBUG - we got past the switch');
+
+	my $challenge = $self->{cgi}->param('recaptcha_challenge_field');
+	my $response  = $self->{cgi}->param('recaptcha_response_field');
+
+	if($response)
+	{
+		$self->log('captcha','DEBUG - got the response');		
+
+        	# Verify submission
+        	my $result = $self->{captcha_object}->check_answer($self->{captcha_private}, $ENV{'REMOTE_ADDR'}, $challenge, $response);
+
+        	if ( $result->{is_valid} )
+        	{
+			$self->log('captcha','DEBUG - is valid');
+			return 1;
+        	}
+        	else
+        	{
+                	# Error
+			$self->log('captcha','DEBUG -- failed');
+                	my $error = $result->{error};
+			$self->log("captcha","Captcha did not validate - $error");
+			return 0;
+        	}
+	}
+	else
+	{
+		$self->log('captcha','DEBUG - we did not get a response');
+	}
+	
+	return 0;
+}
+
+sub validate_input
+{
+	my ($self,$type,$in) = @_;
+
+	if($type eq 'email' && $in =~ /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b/i)
+	{
+		return 1;
+	}
+	elsif($type eq 'md5hex' && $in =~ /\b[a-f0-9]{32}\b/)
 	{
 		return 1;
 	}
@@ -984,11 +1107,19 @@ sub valid_email
 		return 0;
 	}
 }
+
 =head1 AUTHOR
 
 Phil Massyn, C<< <phil at massyn.net> >>
 
 =head1 REVISION
+
+0.03	Added no-cache tags to header function
+	Added input validation procedure
+	Added input validation for tokens
+	Moved valid_email procedure into validate_input
+	Fixed omission of $forgot parameter check on sub forgot
+	Added reCaptcha
 
 0.02	Added registration option (including Net::SMTP)
 	Changed password encryption to a salted hash
