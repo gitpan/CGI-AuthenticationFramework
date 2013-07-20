@@ -11,7 +11,7 @@ use Auth::Yubikey_WebClient;			# for Yubikey support
 use Net::SMTP;					# to send registration & password reminder emails
 use POSIX qw(strftime);				# used for no-cache headers
 use Captcha::reCAPTCHA;				# the captcha module
-
+use HTML::Entities;
 
 =head1 NAME
 
@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.03
+Version 0.04
 
 =cut
 
-our $VERSION = '0.03';
+our $VERSION = '0.04';
 
 =head1 SYNOPSIS
 
@@ -254,22 +254,22 @@ sub secure
 	if($self->session_valid)
 	{
 		$self->session_refresh();
-		if($self->{cgi}->param('func') eq 'logout')
+		if($self->param('func') eq 'logout')
 		{
 			$self->logout();
 		}
-		if($self->{cgi}->param('func') eq 'password')
+		if($self->param('func') eq 'password')
 		{
 			$self->change_password();
 		}
 	}
 	else
 	{
-		if($self->{cgi}->param('func') eq 'register')
+		if($self->param('func') eq 'register')
 		{
 			$self->register();
 		}
-		if($self->{cgi}->param('func') eq 'forgot')
+		if($self->param('func') eq 'forgot')
 		{
 			$self->forgot();
 		}
@@ -292,7 +292,7 @@ sub header
 		return;
 	}
 
-	my $cookie = new CGI::Cookie(-name=>$self->{cookie},-value=>$self->{session});
+	my $cookie = new CGI::Cookie(-name=>$self->{cookie},-value=>$self->{session},-secure=>($ENV{HTTPS}eq 'on' ? 1 : 0));
 
 	my %opts;
        	if($opt_ref)
@@ -323,8 +323,8 @@ sub forgot
 {
 	my ($self) = @_;
 
-	my $token = $self->{cgi}->param('token') 	? $self->{cgi}->param('token') 		: '';
-	my $user  = $self->{cgi}->param('username')  	? $self->{cgi}->param('username')	: ''; 
+	my $token = $self->param('token') 	? $self->param('token') 		: '';
+	my $user  = $self->param('username')  	? $self->param('username')	: ''; 
 
 	if($self->{forgot} != 1)
 	{
@@ -437,8 +437,8 @@ sub register
 		return;
 	}
 
-	my $user  = $self->{cgi}->param('username');
-	my $token = $self->{cgi}->param('token');
+	my $user  = $self->param('username');
+	my $token = $self->param('token');
 
 	$self->{username} = $user;
 
@@ -562,8 +562,8 @@ sub change_password
 {
 	my ($self) = @_;
 
-	my $pass1 = $self->{cgi}->param('pass1') ? $self->{cgi}->param('pass1') : '';
-	my $pass2 = $self->{cgi}->param('pass2') ? $self->{cgi}->param('pass2') : '';
+	my $pass1 = $self->param('pass1') ? $self->param('pass1') : '';
+	my $pass2 = $self->param('pass2') ? $self->param('pass2') : '';
 
 	if($pass1 eq '' || $pass2 eq '')
 	{
@@ -641,15 +641,14 @@ sub read_login_form
 {
 
 	my ($self) = @_;
-	my $cgi = $self->{cgi};
-	return ($cgi->param('username'),$cgi->param('password'),$cgi->param('yubiotp'));
+	return ($self->param('username'),$self->param('password'),$self->param('yubiotp'));
 }
 
 sub login
 {
 	my ($self) = @_;
 
-	my $func = $self->{cgi}->param('func') ? $self->{cgi}->param('func') : '';
+	my $func = $self->param('func') ? $self->param('func') : '';
 	
 	if($func ne 'login')
 	{
@@ -699,7 +698,12 @@ sub session_refresh
 {
 	my ($self) = @_;
 	# update the timestamp of the session so it doesn't time out
-	$self->{dbh}->do('update tbl_session set session_time = CURRENT_TIMESTAMP where session = ?',undef,$self->{session});
+
+	# generate a new session ID to prevent spoofing of cookies
+	my $old_session = $self->{session};
+	$self->{session} = $self->generate_token();
+
+	$self->{dbh}->do('update tbl_session set session_time = CURRENT_TIMESTAMP,session = ? where session = ?',undef,$self->{session},$old_session);
 }
 
 sub session_valid
@@ -865,13 +869,13 @@ sub finish
 
 Generates an HTML form based on a schema
 
-form (schema,submit text,hidden func field)
+form (schema,submit text,hidden func field,title for the header,captcha option,%VALUES)
 
 =cut
 
 sub form
 {
-	my ($self,$schema,$submit,$func,$title,$captcha) = @_;
+	my ($self,$schema,$submit,$func,$title,$captcha,%VALUES) = @_;
 	
 	my $cgi = $self->{cgi};
 
@@ -882,26 +886,67 @@ sub form
 	foreach my $f (split(/\n/,$schema))
 	{
 		chomp($f);
-		my ($fn,$desc,$type,$size) = split(/\,/,$f);
-		print $cgi->start_Tr;
+		my ($fn,$desc,$type,$size,$sql) = split(/\,/,$f);
+
+		my $value = $VALUES{$fn};
+
+		if($type eq 'hidden')
+		{
+			print $cgi->hidden(-name=>$fn,-value=>$value);
+		}
+		else
+		{
+			print $cgi->start_Tr;
 			print $cgi->th($desc);
 			print $cgi->start_td;
 			if($type eq 'text')
 			{
-				print $cgi->textfield(-name=>$fn,
-		    			-size=>$size);
+				print $cgi->textfield(
+					-name=>$fn,
+		    			-size=>$size,
+					-value=>$value
+					);
 			}
 			elsif($type eq 'password')
 			{
-				print $cgi->password_field(-name=>$fn,
-					-size=>$size);
+				print $cgi->password_field(
+					-name=>$fn,
+					-size=>$size,
+					-value=>$value
+					);
+			}
+			elsif($type eq 'textarea')
+			{
+				my ($r,$c) = split(/\|/,$size);
+				print $cgi->textarea(
+					-name=>$fn,
+					-rows=>$r,
+					-cols=>$c
+					);
+			}
+			elsif($type eq 'dropdown')
+			{
+				my $sth = $self->{dbh}->prepare($sql);
+				$sth->execute();
+
+				print "<select name=\"$fn\">\n";
+				while(my @ary = $sth->fetchrow_array())
+				{
+					print $cgi->option({-value=>encode_entities($ary[0])},encode_entities($ary[0]));
+				}
+				print "</select>\n";
+			}
+			elsif($type eq 'readonly')
+			{
+				print $value;
 			}
 			else
 			{
 				print "Unknown schema type : $type";
 			}
 			print $cgi->end_td;
-		print $cgi->end_Tr;
+			print $cgi->end_Tr;
+		}
 	}
 
 	print $cgi->Tr($cgi->th("&nbsp;"),
@@ -919,6 +964,160 @@ sub form
 
 }
 
+=head2 form_insert
+
+Takes the input from a form, and inserts it into a database
+
+Input : schema, table, default values (for readonly fields)
+
+=cut
+
+sub form_insert
+{
+	my ($self,$schema,$table,%VALUES) = @_;
+
+	my $dbh = $self->{dbh};
+
+	# read the schema, and start constructing the SQL
+
+	my @fields;
+	my @values1;
+	my @values2;
+	foreach my $s (split(/\n/,$schema))
+	{
+		chomp($s);
+
+		my ($fn,$desc,$type) = split(/\,/,$s);
+
+		push(@fields,$fn);
+		push(@values1,"?");
+		push(@values2,$type eq 'readonly' ? $VALUES{$fn} : $self->param($fn));
+	}
+
+	my $sql = "insert into $table (" . join (",",@fields) . ") values (" . join(",",@values1) . ")";
+
+	return $dbh->do($sql,undef,@values2);
+}
+
+=head2 form_list
+
+Show the result of a SQL table
+
+=cut
+
+sub form_list
+{
+	my ($self,$schema,$table,$title,$linkfield,$func,$where) = @_;
+
+	my $cgi = $self->{cgi};
+
+	print $cgi->h2($title);
+	my @fields;
+	my @desc;
+
+	my $linkc = '';
+
+	my $c = 0;
+	push(@fields,'id');
+	foreach my $s (split(/\n/,$schema))
+	{
+		my ($fn,$de) = split(/\,/,$s);
+		push(@fields,$fn);
+		push(@desc,$de);
+		if($fn eq $linkfield)
+		{
+			$linkc = $c;
+		}
+		$c++;
+	}
+	print $cgi->start_table({border=>1});
+	print $cgi->Tr($cgi->th([@desc]));
+
+	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where");
+	$sth->execute();
+	while(my ($id,@ary) = $sth->fetchrow_array())
+	{
+		print $cgi->Tr;
+		my $c = 0;
+		foreach my $f (@ary)
+		{
+			my $r = '';
+			if($c == $linkc)
+			{
+				$r = $cgi->a({href=>"?id=$id&func=$func"},encode_entities($f));
+			}
+			else
+			{
+				$r = encode_entities($f);
+			}
+			print $cgi->td($r);
+			$c++;
+		}
+		print $cgi->end_Tr;
+	}
+
+	print $cgi->end_table;
+}
+
+=head2 form_create_table
+
+Create a mySQL table based on a schema definition
+
+input : schema, table name
+
+=cut
+
+sub form_create_table
+{
+	my ($self,$schema,$table) = @_;
+
+	# create the table if it doesn't exist yet
+	if(!$self->{dbh}->do('select 1 from ?',undef,$table))
+	{
+		$self->{dbh}->do("create table $table (id integer auto_increment primary key)");
+	}
+
+	# check the fields
+	# read all fields from the table
+	my $sth = $self->{dbh}->prepare("desc $table");
+	$sth->execute();
+
+	my %DB;
+	while(my @ary = $sth->fetchrow_array())
+	{
+		$DB{$ary[0]} = $ary[1];
+	}
+
+	foreach my $s (split(/\n/,$schema))
+	{
+		my ($fn,$de,$ty,$sz,$sql) = split(/\,/,$s);
+		if(!$DB{$fn})
+		{
+			my $sql;
+			if($ty eq 'textarea')
+			{
+				$sql = "text";
+			}
+			else
+			{
+				$sql = "varchar($sz)";
+			}
+
+			$self->{dbh}->do("alter table $table add column $fn $sql");
+		}
+	}
+}
+
+sub param
+{
+	my ($self,$c) = @_;
+
+	my $in = $self->{cgi}->param($c);
+
+	# strip unsafe characters
+	$in =~ s/[<>\\"\%;\(\)&]//g;
+	return $in;
+}
 =head2 setup_database
 
 Call this module once to setup the database tables.  Running it multiple times will only introduce excessive load on the DB, but won't delete any tables.
@@ -1058,8 +1257,8 @@ sub validate_captcha
 	}
 	$self->log('captcha','DEBUG - we got past the switch');
 
-	my $challenge = $self->{cgi}->param('recaptcha_challenge_field');
-	my $response  = $self->{cgi}->param('recaptcha_response_field');
+	my $challenge = $self->param('recaptcha_challenge_field');
+	my $response  = $self->param('recaptcha_response_field');
 
 	if($response)
 	{
@@ -1094,6 +1293,10 @@ sub validate_input
 {
 	my ($self,$type,$in) = @_;
 
+	if(!$in)
+	{
+		$in = '';
+	}
 	if($type eq 'email' && $in =~ /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b/i)
 	{
 		return 1;
@@ -1113,6 +1316,15 @@ sub validate_input
 Phil Massyn, C<< <phil at massyn.net> >>
 
 =head1 REVISION
+0.04	Updated form to handle hidden field, and input values
+	Added textarea, and readonly fields
+	Included dropdown with SQL in the schema support
+	Added form_create_table
+	Added form_insert
+	Added form_list
+	Added HTML::Entities for encoding output string (prevent cross site scripting)
+	Changed the cookie's session ID to reset on every click
+	Make the cookie secure
 
 0.03	Added no-cache tags to header function
 	Added input validation procedure
