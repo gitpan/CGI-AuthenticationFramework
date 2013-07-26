@@ -25,8 +25,8 @@ $sec->secure();
 print $sec->header();
 
 # == We can call some additional functions
-print "<a href=\"?func=logout\">Logout</a>\n";
-print "<a href=\"?func=password\">Change password</a>\n";
+print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('logout');\">Logout</a>\n";
+print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('password');\">Change password</a>\n";
 
 print "<p>\n";
 print "This is the secret message.<br>\n";

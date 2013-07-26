@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.04
+Version 0.05
 
 =cut
 
-our $VERSION = '0.04';
+our $VERSION = '0.05';
 
 =head1 SYNOPSIS
 
@@ -58,8 +58,8 @@ Sample CGI script :-
 	print $sec->header();
 
 	# == We can call some additional functions
-	print "<a href=\"?func=logout\">Logout</a>\n";
-	print "<a href=\"?func=password\">Change password</a>\n";
+	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('logout');\">Logout</a>\n";
+	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('password');\">Change password</a>\n";
 	
 	print "<p>\n";
 	print "This is the secret message.<br>\n";
@@ -251,6 +251,11 @@ sub secure
 {
 	my ($self) = @_;
 
+	# We won't allow any type of GET methods
+	if($ENV{QUERY_STRING} ne '')
+	{
+		$self->error('Illegal content posted via GET method');
+	}
 	if($self->session_valid)
 	{
 		$self->session_refresh();
@@ -315,7 +320,7 @@ sub header
         				pre-check=0
         				post-check=0
     				));
-	return CGI::header({%opts}) . $self->{header};
+	return CGI::header({%opts}) . $self->{header} . $self->build_post_js("securefunction",$self->{cgi}->url,"","func");
 
 }
 
@@ -356,7 +361,7 @@ sub forgot
 		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 0');
                 if($sth->execute($user))
                 {
-                        my ($user2,$token2) = $sth->fetchrow_array();
+                        my ($user2,$token2) = $self->xss($sth->fetchrow_array());
                         $self->{username} = $user2;
                         $sth->finish();
 
@@ -469,7 +474,7 @@ sub register
 		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 1');
 		if($sth->execute($user))
 		{
-			my ($user2,$token2) = $sth->fetchrow_array();
+			my ($user2,$token2) = $self->xss($sth->fetchrow_array());
 			$self->{username} = $user2;
 			$sth->finish();
 
@@ -723,7 +728,7 @@ sub session_valid
 
 	if($sth->execute($self->{session}))
 	{
-		my @ary = $sth->fetchrow_array();
+		my @ary = $self->xss($sth->fetchrow_array());
 		my $u = $ary[0] ? $ary[0] : '';
 		$sth->finish();
 
@@ -744,7 +749,7 @@ sub authenticate
 
 	if($sth->execute($user))
 	{
-		my ($u,$y,$p) = $sth->fetchrow_array();
+		my ($u,$y,$p) = $self->xss($sth->fetchrow_array());
 		$sth->finish();
 
 		if(crypt($pass,$p) ne $p)
@@ -883,10 +888,16 @@ sub form
 	print $cgi->start_form({-action=>$cgi->url});;
 	print $cgi->start_table;
 
+	my $isid = 0;
 	foreach my $f (split(/\n/,$schema))
 	{
 		chomp($f);
 		my ($fn,$desc,$type,$size,$sql) = split(/\,/,$f);
+
+		if($fn eq 'id')
+		{
+			$isid = 1;
+		}
 
 		my $value = $VALUES{$fn};
 
@@ -921,7 +932,8 @@ sub form
 				print $cgi->textarea(
 					-name=>$fn,
 					-rows=>$r,
-					-cols=>$c
+					-cols=>$c,
+					-value=>$value
 					);
 			}
 			elsif($type eq 'dropdown')
@@ -930,15 +942,17 @@ sub form
 				$sth->execute();
 
 				print "<select name=\"$fn\">\n";
-				while(my @ary = $sth->fetchrow_array())
+				while(my @ary = $self->xss($sth->fetchrow_array()))
 				{
-					print $cgi->option({-value=>encode_entities($ary[0])},encode_entities($ary[0]));
+					my $sel = $ary[0] eq $value ? 1 : 0;
+					print $cgi->option({-value=>$ary[0],-selected=>$sel},$ary[0]);
 				}
 				print "</select>\n";
 			}
 			elsif($type eq 'readonly')
 			{
 				print $value;
+				print $cgi->hidden(-name=>$fn,-value=>$value);
 			}
 			else
 			{
@@ -960,10 +974,104 @@ sub form
 		print $self->{captcha_object}->get_html( $self->{captcha_public} );
         }
 
+	if($VALUES{id} && $isid == 0)
+	{
+		print $cgi->hidden(-name=>'id',-value=>$VALUES{id},-override=>1);
+	}
 	print $cgi->end_form;
 
 }
 
+# call xss after every fetchrow_array
+sub xss
+{
+	my ($self,@input) = @_;
+
+	my @new;
+	foreach my $f (@input)
+	{
+		push(@new,encode_entities($f));
+	}
+	return @new;
+}
+
+=head2 form_update
+
+Updates the data in the table 
+
+input : schema, table name
+
+=cut
+
+sub form_update
+{
+	my ($self,$schema,$table) = @_;
+
+	my $id = $self->param('id');
+	if(!$self->validate_input('number',$id))
+	{
+		$self->error("id was not what we expected- $id");
+	}
+
+	my $sql = "update $table set ";
+
+	my @VALUES;
+	foreach my $s (split(/\n/,$schema))
+	{
+		my ($fn,$desc) = split(/\,/,$s);
+		$sql .= "$fn = ?,";
+
+		push(@VALUES,$self->param($fn));
+	}
+	$sql =~ s/\,$//g;
+	$sql .= " where id = ?";
+
+	my $sth = $self->{dbh}->prepare($sql);
+
+	if($sth->execute(@VALUES,$id))
+	{
+		print "success\n";
+	}
+	else
+	{
+		print $DBI::errstr();
+	}
+}
+
+=head2 form_edit
+
+Shows the edit form after an id was passed to it
+
+input : schema, table, title, button text, func field
+
+=cut
+
+sub form_edit
+{
+	my ($self,$schema,$table,$title,$button,$func) = @_;
+
+	my $id = $self->param('id');
+
+	if(!$self->validate_input('number',$id))
+	{
+		$self->error("id was not what we expected- $id");
+	}
+
+	my $sth = $self->{dbh}->prepare("select * from $table where id = ?");
+
+	if($sth->execute($id))
+	{
+		my $R = $sth->fetchrow_hashref();
+		$sth->finish();
+
+		$self->form($schema,$button,$func,$title,0,%{$R});
+	}
+	else
+	{
+		$self->error("Unable to view id " . $DBI::errstr);
+	}
+
+}
 =head2 form_insert
 
 Takes the input from a form, and inserts it into a database
@@ -1030,12 +1138,15 @@ sub form_list
 		}
 		$c++;
 	}
+
+	print $self->build_post_js("submitform$func",$self->{cgi}->url,"func=$func","id");
+
 	print $cgi->start_table({border=>1});
 	print $cgi->Tr($cgi->th([@desc]));
 
 	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where");
 	$sth->execute();
-	while(my ($id,@ary) = $sth->fetchrow_array())
+	while(my ($id,@ary) = $self->xss($sth->fetchrow_array()))
 	{
 		print $cgi->Tr;
 		my $c = 0;
@@ -1044,11 +1155,11 @@ sub form_list
 			my $r = '';
 			if($c == $linkc)
 			{
-				$r = $cgi->a({href=>"?id=$id&func=$func"},encode_entities($f));
+				$r = "<a href=\"javascript:void();\" onclick=\"javascript:submitform$func($id);\">$f</a>";
 			}
 			else
 			{
-				$r = encode_entities($f);
+				$r = $f;
 			}
 			print $cgi->td($r);
 			$c++;
@@ -1083,7 +1194,7 @@ sub form_create_table
 	$sth->execute();
 
 	my %DB;
-	while(my @ary = $sth->fetchrow_array())
+	while(my @ary = $self->xss($sth->fetchrow_array()))
 	{
 		$DB{$ary[0]} = $ary[1];
 	}
@@ -1115,7 +1226,7 @@ sub param
 	my $in = $self->{cgi}->param($c);
 
 	# strip unsafe characters
-	$in =~ s/[<>\\"\%;\(\)&]//g;
+	$in =~ s/[<>\\"\%;\(\)&\0]//g;
 	return $in;
 }
 =head2 setup_database
@@ -1289,6 +1400,47 @@ sub validate_captcha
 	return 0;
 }
 
+sub build_post_js
+{
+	my ($self,$procname,$action,$url,$id) = @_;
+
+	my $JS = "<script language=\"javascript\">\n";
+	$JS .= "function $procname (id)\n{\n";
+	$JS .= "\tvar form = document.createElement(\"FORM\");\n";
+	$JS .= "\tform.enctype = \"multipart/form-data\";\n";
+	$JS .= "\tform.method = \"post\";\n";
+	$JS .= "\tform.action = \"$action\";\n";
+	$JS .= "\tform.style.display = \"none\";\n";
+
+	# seperate the url by elements
+	foreach my $e (split(/\&/,$url))
+	{
+		my ($name,$value) = split(/\=/,$e);
+		$JS .= "\n";
+		$JS .= "\tvar hf$name = document.createElement(\"input\");\n";
+		$JS .= "\thf$name.setAttribute(\"type\", \"hidden\");\n";
+		$JS .= "\thf$name.setAttribute(\"name\", \"$name\");\n";
+		$JS .= "\thf$name.setAttribute(\"value\", \"$value\");\n";
+		$JS .= "\tform.appendChild(hf$name);\n";
+	}
+
+	if($id)
+	{
+		$JS .= "\n";
+		$JS .= "\tvar hf$id = document.createElement(\"input\");\n";
+		$JS .= "\thf$id.setAttribute(\"type\", \"hidden\");\n";
+		$JS .= "\thf$id.setAttribute(\"name\", \"$id\");\n";
+		$JS .= "\thf$id.setAttribute(\"value\", id);\n";
+		$JS .= "\tform.appendChild(hf$id);\n";
+	}
+	$JS .= "\n";
+	$JS .= "\tdocument.body.appendChild(form);\n";
+	$JS .= "\tform.submit();\n";
+	$JS .= "}\n";
+	$JS .= "</script>\n";
+	return $JS;
+}
+
 sub validate_input
 {
 	my ($self,$type,$in) = @_;
@@ -1305,6 +1457,10 @@ sub validate_input
 	{
 		return 1;
 	}
+	elsif($type eq 'number' && $in =~ /\b[0-9]+\b/)
+	{
+		return 1;
+	}
 	else
 	{
 		return 0;
@@ -1316,6 +1472,12 @@ sub validate_input
 Phil Massyn, C<< <phil at massyn.net> >>
 
 =head1 REVISION
+0.05	Fixed xss to check all array elements when calling fetchrow_array
+	Replaced all GET with POST functions, and prevent futher usage of GET
+	Added form_edit function
+	Fixed missing hidden id in form function
+	Updated param function to strip unsafe characters
+
 0.04	Updated form to handle hidden field, and input values
 	Added textarea, and readonly fields
 	Included dropdown with SQL in the schema support
