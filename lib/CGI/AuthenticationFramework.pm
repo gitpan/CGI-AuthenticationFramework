@@ -11,7 +11,7 @@ use Auth::Yubikey_WebClient;			# for Yubikey support
 use Net::SMTP;					# to send registration & password reminder emails
 use POSIX qw(strftime);				# used for no-cache headers
 use Captcha::reCAPTCHA;				# the captcha module
-use HTML::Entities;
+use HTML::Entities;				# Pass all output here, to prevent cross site scripting issues
 
 =head1 NAME
 
@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.05
+Version 0.08
 
 =cut
 
-our $VERSION = '0.05';
+our $VERSION = '0.08';
 
 =head1 SYNOPSIS
 
@@ -238,6 +238,7 @@ sub new
 		$self->{session} = $cookies{$self->{cookie}}->value;
 	}
 
+	$self->housekeeping();
 	return $self;
 }
 
@@ -251,13 +252,15 @@ sub secure
 {
 	my ($self) = @_;
 
-	# We won't allow any type of GET methods
-	if($ENV{QUERY_STRING} ne '')
-	{
-		$self->error('Illegal content posted via GET method');
-	}
 	if($self->session_valid)
 	{
+
+		# We won't allow any type of GET methods
+		if($ENV{QUERY_STRING} ne '')
+		{
+			$self->error('Illegal content posted via GET method');
+		}
+
 		$self->session_refresh();
 		if($self->param('func') eq 'logout')
 		{
@@ -277,6 +280,12 @@ sub secure
 		if($self->param('func') eq 'forgot')
 		{
 			$self->forgot();
+		}
+		
+		# We won't allow any type of GET methods
+		if($ENV{QUERY_STRING} ne '')
+		{
+			$self->error('Illegal content posted via GET method');
 		}
 		$self->login();
 	}
@@ -367,7 +376,8 @@ sub forgot
 
 			if($user2 eq '')
 			{
-				$self->error("User does not exist");
+				$self->error('Access denied');
+				$self->log('forgot','User does not exist');
 			}
 			else
 			{
@@ -379,7 +389,7 @@ sub forgot
 					my $newpass = $self->generate_password();
 					my $tokennew = $self->generate_token();
 
-                                	if($sth->execute($self->encrypt($newpass,$tokennew),$user2))
+                                	if($sth->execute($self->encrypt($newpass),$user2))
 					{
 						# On success, let's email it out
 
@@ -390,7 +400,7 @@ sub forgot
 					}
 					else
 					{
-						$self->error("Could not reset the password : " . $DBI::errstr);
+						$self->error("Could not reset the password");
 					}
 
 
@@ -415,7 +425,7 @@ sub forgot
 					}
 					else
 					{
-						$self->error("can not create new token : " . $DBI::errstr);
+						$self->error("can not create new token");
 					}
 
                                 }
@@ -424,10 +434,6 @@ sub forgot
 					$self->error("Invalid token to reset the password");
 				}
 			}
-		}
-		else
-		{
-			$self->error($DBI::errstr);
 		}
 	}
 }
@@ -510,7 +516,7 @@ sub register
 						else
 						{
 							$self->log('register','Unable to validate the user');
-							$self->error("Unable to validate account : " . $DBI::errstr);
+							$self->error("Unable to validate account");
 						}
 					}
 				}
@@ -535,16 +541,23 @@ sub register
 				}
 				else
 				{
-					$self->error("Can not create a registration token : " . $DBI::errstr);
+					$self->error("Can not create a registration token");
 				}
 
 			}
 		}
-		else
-		{
-			$self->error("Can not check if user exists : " . $DBI::errstr);
-		}
 	}
+}
+
+sub housekeeping
+{
+	my ($self) = @_;
+
+	# Delete old sessions (at least double the session timeout)
+	$self->{dbh}->do('delete from tbl_session where session_time > date_sub(current_timestamp,INTERVAL " . $self->{timeout} * 2 . " SECOND)');
+
+	# Delete old session variables
+	$self->{dbh}->do('delete from tbl_session_vars where session not in (select session from tbl_session)');
 }
 
 sub generate_token
@@ -560,6 +573,8 @@ sub logout
 
 	# delete any old sessions for this user (if they should exist)
 	$self->{dbh}->do('delete from tbl_session where session=?',undef,$self->{session});
+	$self->{dbh}->do('delete from tbl_session_vars where session=?',undef,$self->{session});
+
 	$self->login();
 }
 
@@ -584,10 +599,10 @@ sub change_password
 			$self->error("The two passwords do not match.");
 		}
 
-		# are they long enough ?
-		if(length($pass1) <= 7)
+		# is the password strong enough?
+		if(!$self->validate_input('password',$pass1))
 		{
-			$self->error("The password you chose is not long enough.");
+			$self->error("The password you chose is not strong enough.");
 		}
 
 		if($self->{dbh}->do("update tbl_users set password = ? where username = ?",undef,$self->encrypt($pass1),$self->{username}))
@@ -597,7 +612,7 @@ sub change_password
 		}
 		else
 		{
-			$self->error("Cannot change password : " . $DBI::errstr);
+			$self->error("Cannot change password");
 		}
 	}
 }
@@ -607,8 +622,8 @@ sub change_password_form
 	my ($self) = @_;
 
 	my $schema = <<SCHEMA
-pass1,Password,password,20
-pass2,Confirm,password,20
+pass1,Password,password,20,password
+pass2,Confirm,password,20,password
 SCHEMA
 ;
 	$self->form($schema,'Change password','password','Change your password');
@@ -622,8 +637,8 @@ sub login_form
 
 	# Fieldname,Description,type,size
 	my $schema = <<SCHEMA
-username,Email Address,text,30
-password,Password,password,50
+username,Email Address,text,30,email
+password,Password,password,50,password
 SCHEMA
 ;
 	if($self->{yubikey} == 1)
@@ -668,6 +683,7 @@ sub login
 		if($self->authenticate($user,$pass,$yubi))
 		{
 			$self->log('logon','User logged on successfully');
+			$self->housekeeping();	# we need to perform housekeeping, we'll do it when a user logs on
 			$self->session_create();
 		}
 		else
@@ -695,7 +711,7 @@ sub session_create
 	# and inserting it
 	if(!$sth->execute($self->{username},$self->{session},time))
 	{
-		$self->error("Could not create session : " .$DBI::errstr);
+		$self->error("Could not create session");
 	}
 }
 
@@ -709,6 +725,7 @@ sub session_refresh
 	$self->{session} = $self->generate_token();
 
 	$self->{dbh}->do('update tbl_session set session_time = CURRENT_TIMESTAMP,session = ? where session = ?',undef,$self->{session},$old_session);
+	$self->{dbh}->do('update tbl_session_vars set session=? where session = ?',undef,$self->{session},$old_session);
 }
 
 sub session_valid
@@ -827,7 +844,7 @@ sub authenticate
 	}
 	else
 	{
-		$self->error("Access denied error : " . $DBI::errstr);
+		$self->error("Access denied");
 		return 0;
 	}
 	return 0;
@@ -876,6 +893,32 @@ Generates an HTML form based on a schema
 
 form (schema,submit text,hidden func field,title for the header,captcha option,%VALUES)
 
+=head3 Schema format (field name, description, type, validation, sql)
+
+=head4 fieldname
+
+The field name that will be used in SQL and param calls
+
+=head4 description
+
+The field name that will be displayed
+
+=head4 type
+
+The type of the field, ie text, textarea, dropdown, or password
+
+=head4 size
+
+Defines the size of the field.
+
+=head4 validation
+
+Defines the input data check that will be performed to ensure the input validation is passed.  Options can be email, password, number or text.
+
+=head4 sql
+
+Defines the SQL query to execute that will populate a dropdown list, should you use a dropdown.
+
 =cut
 
 sub form
@@ -885,14 +928,14 @@ sub form
 	my $cgi = $self->{cgi};
 
 	print $cgi->h2($title);
-	print $cgi->start_form({-action=>$cgi->url});;
+	print $cgi->start_form({-action=>$cgi->url,-autocomplete=>"off"});;
 	print $cgi->start_table;
 
 	my $isid = 0;
 	foreach my $f (split(/\n/,$schema))
 	{
 		chomp($f);
-		my ($fn,$desc,$type,$size,$sql) = split(/\,/,$f);
+		my ($fn,$desc,$type,$size,$validation,$sql) = split(/\,/,$f);
 
 		if($fn eq 'id')
 		{
@@ -944,8 +987,14 @@ sub form
 				print "<select name=\"$fn\">\n";
 				while(my @ary = $self->xss($sth->fetchrow_array()))
 				{
-					my $sel = $ary[0] eq $value ? 1 : 0;
-					print $cgi->option({-value=>$ary[0],-selected=>$sel},$ary[0]);
+					if($ary[0] eq $value)
+					{
+						print "<option value=\"$ary[0]\" selected>$ary[0]</option>\n";
+					}
+					else
+					{
+						print "<option value=\"$ary[0]\">$ary[0]</option>\n";
+					}
 				}
 				print "</select>\n";
 			}
@@ -1007,10 +1056,12 @@ sub form_update
 {
 	my ($self,$schema,$table) = @_;
 
+	$self->log('update','Editing an entry');
+	
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
 	{
-		$self->error("id was not what we expected- $id");
+		$self->error("id was not what we expected");
 	}
 
 	my $sql = "update $table set ";
@@ -1018,24 +1069,33 @@ sub form_update
 	my @VALUES;
 	foreach my $s (split(/\n/,$schema))
 	{
-		my ($fn,$desc) = split(/\,/,$s);
+		my ($fn,$desc,$type,$sz,$valid,$ddsql) = split(/\,/,$s);
 		$sql .= "$fn = ?,";
 
-		push(@VALUES,$self->param($fn));
+		my $v = $self->param($fn);
+
+		if($type =~ /password/i)
+		{
+			my $sth = $self->{dbh}->prepare("select $fn from $table where id = ?");
+			$sth->execute($self->param('id'));
+			my ($oldpw) = $sth->fetchrow_array();
+			$sth->finish();
+
+			# if the old password in the table is different to the one passed to us, encrypt it
+			if($oldpw ne $v)
+			{
+				$v = $self->encrypt($v);
+			}
+		}
+
+		push(@VALUES,$v);
 	}
 	$sql =~ s/\,$//g;
 	$sql .= " where id = ?";
 
 	my $sth = $self->{dbh}->prepare($sql);
 
-	if($sth->execute(@VALUES,$id))
-	{
-		print "success\n";
-	}
-	else
-	{
-		print $DBI::errstr();
-	}
+	return $sth->execute(@VALUES,$id);
 }
 
 =head2 form_edit
@@ -1054,7 +1114,7 @@ sub form_edit
 
 	if(!$self->validate_input('number',$id))
 	{
-		$self->error("id was not what we expected- $id");
+		$self->error("id was not what we expected");
 	}
 
 	my $sth = $self->{dbh}->prepare("select * from $table where id = ?");
@@ -1068,10 +1128,34 @@ sub form_edit
 	}
 	else
 	{
-		$self->error("Unable to view id " . $DBI::errstr);
+		$self->error("Unable to view id");
 	}
 
 }
+
+=head2 form_delete
+
+Deletes the entry from the table
+
+=cut
+
+sub form_delete
+{
+	my ($self,$table) = @_;
+
+	$self->log('delete','Deleting entry');
+
+	my $id = $self->param('id');
+	if(!$self->validate_input('number',$id))
+	{
+		$self->error("id was not what we expected");
+	}
+
+	my $sth = $self->{dbh}->prepare("delete from $table where id = ?");
+
+	return $sth->execute($id);
+}
+
 =head2 form_insert
 
 Takes the input from a form, and inserts it into a database
@@ -1086,6 +1170,7 @@ sub form_insert
 
 	my $dbh = $self->{dbh};
 
+	$self->log('insert','Added an entry');
 	# read the schema, and start constructing the SQL
 
 	my @fields;
@@ -1095,11 +1180,21 @@ sub form_insert
 	{
 		chomp($s);
 
-		my ($fn,$desc,$type) = split(/\,/,$s);
+		my ($fn,$desc,$type,$sz,$valid,$sql) = split(/\,/,$s);
 
+		my $v = $self->param($fn);
+		if(!$self->validate_input($valid,$v))
+		{
+			$self->error("\'$desc\' did not validate ($v).  Expecting it to be a $valid.");
+		}
+
+		if($type =~ /password/i)
+		{
+			$v = $self->encrypt($v);
+		}
 		push(@fields,$fn);
 		push(@values1,"?");
-		push(@values2,$type eq 'readonly' ? $VALUES{$fn} : $self->param($fn));
+		push(@values2,$type eq 'readonly' ? $VALUES{$fn} : $v);
 	}
 
 	my $sql = "insert into $table (" . join (",",@fields) . ") values (" . join(",",@values1) . ")";
@@ -1129,22 +1224,81 @@ sub form_list
 	push(@fields,'id');
 	foreach my $s (split(/\n/,$schema))
 	{
-		my ($fn,$de) = split(/\,/,$s);
-		push(@fields,$fn);
-		push(@desc,$de);
-		if($fn eq $linkfield)
+		my ($fn,$de,$ty) = split(/\,/,$s);
+		if($ty ne 'password')
 		{
-			$linkc = $c;
+			push(@fields,$fn);
+			push(@desc,$de);
+			if($fn eq $linkfield)
+			{
+				$linkc = $c;
+			}
+			$c++;
 		}
-		$c++;
 	}
 
-	print $self->build_post_js("submitform$func",$self->{cgi}->url,"func=$func","id");
+	print $self->build_post_js("submitform$func",$self->{cgi}->url,"func=$func" ,"id");
+
+	my $order = $self->param('order');
+	if($order == 0)
+	{
+		$order = 1;
+	}
+	else
+	{
+		$order = 0;
+	}
+
+	# We need to have func the same as the one that got us here, not the one we want to be when we move on from this page
+	print $self->build_post_js("orderform",$self->{cgi}->url,"func=" . $self->param('func') . "&order=$order","field");
+
+	my $orderfield = $self->param('field');
+
+	my $SQLO = '';
+	if($self->validate_input('number',$orderfield))
+	{
+		$SQLO = " order by " . $fields[$orderfield];
+
+		if($self->validate_input('number',$order))
+		{
+			if($order == 1)
+			{
+				$SQLO .= " DESC";
+			}
+			else
+			{
+				$SQLO .= " ASC";
+			}
+		}
+	}
+
+	# Build the arrow to show where we're filtering
+	my $AR;
+	if($order == 0)
+	{
+		$AR = "^";
+	}
+	else
+	{
+		$AR  = "v";
+	}
 
 	print $cgi->start_table({border=>1});
-	print $cgi->Tr($cgi->th([@desc]));
+	print $cgi->start_Tr();
+	$c = 0;
+	foreach my $f (@desc)
+	{
+		my $RR = '';
+		if($c == $orderfield)
+		{
+			$RR = $AR;
+		}
+		print $cgi->th("<a href=\"javascript:void();\" onclick=\"javascript:orderform($c);\">$f</a> $RR");
+		$c++;
+	}
+	print $cgi->end_Tr;
 
-	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where");
+	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where $SQLO");
 	$sth->execute();
 	while(my ($id,@ary) = $self->xss($sth->fetchrow_array()))
 	{
@@ -1201,7 +1355,7 @@ sub form_create_table
 
 	foreach my $s (split(/\n/,$schema))
 	{
-		my ($fn,$de,$ty,$sz,$sql) = split(/\,/,$s);
+		my ($fn,$de,$ty,$sz,$validation,$sql) = split(/\,/,$s);
 		if(!$DB{$fn})
 		{
 			my $sql;
@@ -1221,13 +1375,50 @@ sub form_create_table
 
 sub param
 {
-	my ($self,$c) = @_;
+	my ($self,$c,$v) = @_;
 
-	my $in = $self->{cgi}->param($c);
+	my $in = $self->{cgi}->param($c,$v);
 
 	# strip unsafe characters
 	$in =~ s/[<>\\"\%;\(\)&\0]//g;
 	return $in;
+}
+
+=head2 set_variable
+
+Defines a session variable
+
+input : parameter, value
+
+=cut
+
+sub set_variable
+{
+	my ($self,$param,$value) = @_;
+
+	$self->{dbh}->do('delete from tbl_session_vars where session = ? and param = ?',undef,($self->{session},$param));
+	$self->{dbh}->do('insert into tbl_session_vars (session,param,value) values(?,?,?)',undef,($self->{session},$param,$value));
+}
+
+=head2 get_variable
+
+Retrieves a session variable
+
+input : parameter
+
+Output : value
+
+=cut
+sub get_variable
+{
+	my ($self,$param) = @_;
+
+	my $sth = $self->{dbh}->prepare('select value from tbl_session_vars where session = ? and param = ?');
+	$sth->execute($self->{session},$param);
+	my ($result) = $sth->fetchrow_array();
+	$sth->finish();
+
+	return $result;
 }
 =head2 setup_database
 
@@ -1247,7 +1438,7 @@ sub setup_database
 	#
 	if(!$self->{dbh}->do('select 1 from tbl_users'))
 	{
-		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0)'))
+		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0,is_admin integer default 0)'))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1255,7 +1446,7 @@ sub setup_database
 		{
 			$self->error($DBI::errstr);
 		}
-		if(!$self->{dbh}->do("insert into tbl_users (username,password) values('admin','" . $self->encrypt('password') . "')"))
+		if(!$self->{dbh}->do("insert into tbl_users (username,password,is_admin) values('admin','" . $self->encrypt('password') . "',1)"))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1287,6 +1478,25 @@ sub setup_database
 			$self->error($DBI::errstr);
 		}
 	}
+
+	# Create the session variables table
+	if(!$self->{dbh}->do('select 1 from tbl_session_vars'))
+	{
+		if(!$self->{dbh}->do('create table tbl_session_vars (id integer auto_increment primary key,session varchar(200),param varchar(200),value varchar(255))'))
+		{
+			$self->error($DBI::errstr);
+		}
+
+		if(!$self->{dbh}->do('alter table tbl_session_vars add index (session)'))
+		{
+			$self->error($DBI::errstr);
+		}
+
+		if(!$self->{dbh}-do('alter table tbl_session_vars add index (param)'))
+		{
+			$self->error($DBI::errstr);
+		}
+	}
 }
 
 sub encrypt
@@ -1301,11 +1511,7 @@ sub log
 	my ($self,$type,$msg) = @_;
 
 	my $sth = $self->{dbh}->prepare('insert into tbl_logs (username,eventtype,message,eventtime,ip) values (?,?,?,from_unixtime(?),?)');
-	if(!$sth->execute($self->{username},$type,$msg,time,$ENV{REMOTE_ADDR}))
-	{
-		$self->error("Could not log : " . $DBI::errstr);
-	}
-
+	$sth->execute($self->{username},$type,$msg,time,$ENV{REMOTE_ADDR});
 }
 
 sub generate_password
@@ -1360,41 +1566,30 @@ sub validate_captcha
 {
 	my ($self) = @_;
 
-	$self->log('captcha','DEBUG - entering');
-
 	if($self->{captcha} != 1)
 	{
 		return 1;
 	}
-	$self->log('captcha','DEBUG - we got past the switch');
 
 	my $challenge = $self->param('recaptcha_challenge_field');
 	my $response  = $self->param('recaptcha_response_field');
 
 	if($response)
 	{
-		$self->log('captcha','DEBUG - got the response');		
-
         	# Verify submission
         	my $result = $self->{captcha_object}->check_answer($self->{captcha_private}, $ENV{'REMOTE_ADDR'}, $challenge, $response);
 
         	if ( $result->{is_valid} )
         	{
-			$self->log('captcha','DEBUG - is valid');
 			return 1;
         	}
         	else
         	{
                 	# Error
-			$self->log('captcha','DEBUG -- failed');
                 	my $error = $result->{error};
 			$self->log("captcha","Captcha did not validate - $error");
 			return 0;
         	}
-	}
-	else
-	{
-		$self->log('captcha','DEBUG - we did not get a response');
 	}
 	
 	return 0;
@@ -1445,10 +1640,6 @@ sub validate_input
 {
 	my ($self,$type,$in) = @_;
 
-	if(!$in)
-	{
-		$in = '';
-	}
 	if($type eq 'email' && $in =~ /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,4}\b/i)
 	{
 		return 1;
@@ -1458,6 +1649,14 @@ sub validate_input
 		return 1;
 	}
 	elsif($type eq 'number' && $in =~ /\b[0-9]+\b/)
+	{
+		return 1;
+	}
+	elsif($type eq 'password' && $in =~ /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,20}$/)
+	{
+		return 1;
+	}
+	elsif($type eq 'text' && $in =~ /\b[0-9A-Za-z\'.]+\b/)
 	{
 		return 1;
 	}
@@ -1471,7 +1670,48 @@ sub validate_input
 
 Phil Massyn, C<< <phil at massyn.net> >>
 
+=head1 TODO
+
+=head2 Bugs
+
+=head2 New features
+* Form list -- allow "next page" if it returns more than ie 30 items on a page
+* Searching of tables
+* Admin module to administer user accounts and reset passwords
+* Customize register and forget emails being sent
+* Authorization module (ie group membership)
+
+=head2 Enhancements
+* Clean up of logs older than 12 months (should be customizable)
+* Ability to record additional fields during registration
+* Form list -- add custom fields (ie add actions like Edit & Delete to it)
+* Change form_* functions to use hashes as inputs, not seperate fields
+* Change dropdown & select to use native CGI parameters
+* Change javascript calls to use native cgi->a calls
+
+
 =head1 REVISION
+0.08	Change order of form_list by clicking headers
+	Create tbl_session_vars table
+	Added session variables through get_variable and set_variable
+	Added housekeeping to remove orphaned table entries
+	Fixed dropdown bug not selecting the right value
+
+0.07	Fixed GET blocking not to prevent register and forget from working
+	Added field in database to indicate administrators
+	Prevented "password" fields from being displayed in lists
+	Added the 2nd field to self param
+	Encrypt passwords when using form_insert function
+	Encrypt passwords if they're being changed through form_update
+	Fixed number validation when validating a 0.
+	Added a text input validation
+
+0.06	Added autocomplete to login form
+	Added form_delete function
+	Added strong password enforcement
+	Removed debug logs from captcha procedure
+	Added logging when database gets changed
+
 0.05	Fixed xss to check all array elements when calling fetchrow_array
 	Replaced all GET with POST functions, and prevent futher usage of GET
 	Added form_edit function
