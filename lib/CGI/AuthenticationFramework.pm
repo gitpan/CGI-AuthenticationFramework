@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.08
+Version 0.09
 
 =cut
 
-our $VERSION = '0.08';
+our $VERSION = '0.09';
 
 =head1 SYNOPSIS
 
@@ -60,6 +60,11 @@ Sample CGI script :-
 	# == We can call some additional functions
 	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('logout');\">Logout</a>\n";
 	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('password');\">Change password</a>\n";
+
+	if($sec->is_admin)
+	{
+		print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('admin');\">Admin</a>\n";
+	}
 	
 	print "<p>\n";
 	print "This is the secret message.<br>\n";
@@ -120,6 +125,20 @@ Defines the timeout before a user has to log on again.  Default is 600 seconds.
 
 If you need users to register on their own, set the register option to 1.  Default is 0
 
+=head4 register_template & forgot_template
+
+Optional template that will be used to send the registration email.  
+
+use %URL% to define the URL that will be clicked by the user.  Use %BASE% for the base URL of the program
+
+=head4 register_subject & forgot_subject
+
+Optional subject that will be used
+
+=head4 register_from & forgot_from
+
+Optional from email address to use
+
 =head4 forgot
 
 If you need users to have the ability to reset their passwords by emailing a new one to them, set this option to 1.  Default is 0.
@@ -130,10 +149,6 @@ If you have register enabled, you need to specify SMTP settings
 =head5 smtpserver
 
 The hostname of the SMTP server
-
-=head5 smtpfrom
-
-The from email address to use when sending emails
 
 =head5 smtpuser , smtppass
 
@@ -191,10 +206,17 @@ sub new
 
 	# set the register field
 	$self->{register} = $options{register} ? $options{register} : 0;
+	$self->{register_template} = $options{register_template} ? $options{register_template} : 'Click %URL% to activate your account';
+	$self->{register_subject}  = $options{register_subject}  ? $options{register_subject}  : 'Activate account';
+	$self->{register_from}     = $options{register_from}     ? $options{register_from}     : 'register@localhost';
+
+	# set the forgot field
 	$self->{forgot}   = $options{forgot}   ? $options{forgot}   : 0;
+	$self->{forgot_template} = $options{forgot_template} ? $options{forgot_template} : 'Click %URL% to reset your password';
+	$self->{forgot_subject}  = $options{forgot_subject}  ? $options{forgot_subject}  : 'Password reset';
+	$self->{forgot_from}     = $options{forgot_from}     ? $options{forgot_from}     : 'forgot@localhost';
 
 	$self->{smtpserver} = $options{smtpserver} ? $options{smtpserver} : '';
-	$self->{smtpfrom}   = $options{smtpfrom}   ? $options{smtpfrom}   : '';
 
 	$self->{smtpuser}   = $options{smtpuser}   ? $options{smtpuser}   : '';
 	$self->{smtppass}   = $options{smtppass}   ? $options{smtppass}   : '';
@@ -231,6 +253,34 @@ sub new
 
 	}
 
+	# Customize the feedback messages
+	$self->{msg_access_denied}	= $options{msg_access_denied} ? $options{msg_access_denied} : 'Access denied';
+	$self->{msg_invalid_id}		= $options{msg_invalid_id}    ? $options{msg_invalid_id}    : 'id is not what we expected';
+	$self->{msg_illegal_content}	= $options{msg_illegal_content} ? $options{msg_illegal_content} : 'Illegal content posted via GET';
+
+	$self->{msg_input_invalid}	= $options{msg_input_invalid} ? $options{msg_input_invalid} : '%d did not validate, because we were expecting %t';
+	$self->{msg_register_token}	= $options{msg_register_token} ? $options{msg_register_token} : 'Registration token sent.  Please check your email';
+
+	$self->{msg_session_error}	= $options{msg_session_error} ? $options{msg_session_error} : 'Could not create session';
+
+	$self->{msg_yubikey_need}	= $options{msg_yubikey_need} ? $options{msg_yubikey_need} : 'You will need your yubikey to authenticate';
+
+	$self->{msg_password_reset}	= $options{msg_password_reset} ? $options{msg_password_reset} : 'Your password has been reset and sent to you via email.';
+	$self->{msg_password_error}	= $options{msg_password_error}	? $options{msg_password_error} : 'Could not reset the password';
+	$self->{msg_password_match}	= $options{msg_password_match}  ? $options{msg_password_match} : 'The two passwords do not match';
+	$self->{msg_password_strength}	= $options{msg_password_strength}?$options{msg_password_strength} : 'The password is not strong enough';
+	$self->{msg_password_success}	= $options{msg_password_success} ?$options{msg_password_success}  : 'Password changed';
+	$self->{msg_password_error}	= $options{msg_password_error} 	? $options{msg_password_error} : 'Cannot change password';
+
+	$self->{msg_token_error}	= $options{msg_token_error}	? $options{msg_token_error} : 'Can not create a token';
+	$self->{msg_token_invalid}	= $options{msg_token_invalid}	? $options{msg_token_invalid} : 'The supplied token is invalid';
+
+	$self->{msg_account_invalid}	= $options{msg_account_invalid} ? $options{msg_account_invalid} : 'The provided account is not a valid email address';
+	$self->{msg_account_validated}	= $options{msg_account_validated} ? $options{msg_account_validated} : 'Your account has been validated.  You may now log on.';
+	$self->{msg_account_error}	= $options{msg_account_error}	? $options{msg_account_error} : 'Unable to validate the account';
+
+	
+
 	# Read the cookie
 	my %cookies = fetch CGI::Cookie;
 	if($cookies{$self->{cookie}})
@@ -238,7 +288,6 @@ sub new
 		$self->{session} = $cookies{$self->{cookie}}->value;
 	}
 
-	$self->housekeeping();
 	return $self;
 }
 
@@ -258,7 +307,7 @@ sub secure
 		# We won't allow any type of GET methods
 		if($ENV{QUERY_STRING} ne '')
 		{
-			$self->error('Illegal content posted via GET method');
+			$self->error($self->{msg_illegal_content});
 		}
 
 		$self->session_refresh();
@@ -269,6 +318,10 @@ sub secure
 		if($self->param('func') eq 'password')
 		{
 			$self->change_password();
+		}
+		if($self->param('func') =~ /^admin/)
+		{
+			$self->admin_module();
 		}
 	}
 	else
@@ -285,7 +338,7 @@ sub secure
 		# We won't allow any type of GET methods
 		if($ENV{QUERY_STRING} ne '')
 		{
-			$self->error('Illegal content posted via GET method');
+			$self->error($self->{msg_illegal_content});
 		}
 		$self->login();
 	}
@@ -376,7 +429,7 @@ sub forgot
 
 			if($user2 eq '')
 			{
-				$self->error('Access denied');
+				$self->error($self->{msg_access_denied});
 				$self->log('forgot','User does not exist');
 			}
 			else
@@ -393,14 +446,21 @@ sub forgot
 					{
 						# On success, let's email it out
 
-						my $url = $self->{cgi}->url;
-						my $msg = "Your password has been reset to : $newpass\n\nPlease login at $url";
-						$self->send_email($self->{smtpfrom},$user2,"Password has been reset",$msg);
-						$self->message("Your password has been reset, and mailed to your email address.");
+						my %VARS;
+						$VARS{BASE} = $self->{cgi}->url;
+						$VARS{PASSWORD} = $newpass;
+
+						my $msg = $self->{forgot_reset};
+						foreach my $v (keys %VARS)
+						{
+							$msg =~ s/\%$v\%/$VARS{$v}/g;
+						}
+						$self->send_email($self->{forgot_from},$user2,$self->{forgot_subject},$msg);
+						$self->message($self->{msg_password_reset});
 					}
 					else
 					{
-						$self->error("Could not reset the password");
+						$self->error($self->{msg_password_error});
 					}
 
 
@@ -414,24 +474,29 @@ sub forgot
 					my $sth = $self->{dbh}->prepare('update tbl_users set token = ? where username = ?');
 					if($sth->execute($new_token,$user2))
 					{
+						my %VARS;
 						# new token set, now main a link to the user
-						my $url = $self->{cgi}->url . "?func=forgot&username=$user2&token=$new_token";
+						$VARS{URL} = $self->{cgi}->url . "?func=forgot&username=$user2&token=$new_token";
+						$VARS{BASE} = $self->{cgi}->url;
+						my $msg = $self->{forgot_template};
+						foreach my $v (keys %VARS)
+						{
+							$msg =~ s/\%$v\%/$VARS{$v}/g;
+						}
+						$self->send_email($self->{forgot_from},$user2,$self->{forgot_subject},$msg);
 
-						my $msg = "To reset your password, click here : $url.\n\nIf you did not send this message, ignore it";
-						$self->send_email($self->{smtpfrom},$user2,"Reset your password",$msg);
-
-						$self->message("Check your email for the password reset link");
+						$self->message($self->{msg_password_reset});
 					
 					}
 					else
 					{
-						$self->error("can not create new token");
+						$self->error($self->{msg_token_error});
 					}
 
                                 }
 				else
 				{
-					$self->error("Invalid token to reset the password");
+					$self->error($self->{msg_token_invalid});
 				}
 			}
 		}
@@ -473,7 +538,7 @@ sub register
 		# is it an actual email address?
 		if(!$self->validate_input('email',$user))
 		{
-			$self->error("The provided email address is not a valid email address.");
+			$self->error($self->{msg_account_invalid});
 		}
 
 		# do we already have one of these ?
@@ -489,14 +554,14 @@ sub register
 				if($token2 eq '')
 				{
 					$self->log('register','Account already exists.');
-					$self->error('The user account already exists.  Please select another.');
+					$self->error($self->{msg_access_denied});
 				}
 				else
 				{
 					if($token2 ne $token)
 					{
 						$self->log('register','Provided token does not validate.');
-						$self->error("The token provided does not validate.");
+						$self->error($self->{msg_token_invalid});
 					}
 					else
 					{
@@ -507,16 +572,16 @@ sub register
 						}
 	
 						# Everything checks out... Enable the account
-						my $sth = $self->{dbh}->prepare("update tbl_users set token = '',state = 0 where username = ?");
-						if($sth->execute($user2))
+						my $sth = $self->{dbh}->prepare("update tbl_users set token = '',state = 0,validate_ip = ?, validate_timestamp = from_unixtime(?) where username = ?");
+						if($sth->execute($ENV{REMOTE_ADDR},time,$user2))
 						{
 							$self->log('register','User has been validated');
-							$self->message("Account has been validated.  You can now log on.");
+							$self->message($self->{msg_account_validated});
 						}
 						else
 						{
 							$self->log('register','Unable to validate the user');
-							$self->error("Unable to validate account");
+							$self->error($self->{msg_account_invalid});
 						}
 					}
 				}
@@ -524,26 +589,34 @@ sub register
 			else
 			{
 				# The user does not exist yet
-				my $sth = $self->{dbh}->prepare('insert into tbl_users (username,password,token,state) values(?,?,?,1)');
+				my $sth = $self->{dbh}->prepare('insert into tbl_users (username,password,token,state,register_ip,register_timestamp) values(?,?,?,1,?,from_unixtime(?))');
 				
 				my $newpass = $self->generate_password();
 
 				my $tokennew = $self->generate_token();
 
-				if($sth->execute($user,$self->encrypt($newpass),$tokennew))
+				if($sth->execute($user,$self->encrypt($newpass),$tokennew,$ENV{REMOTE_ADDR},time))
 				{
 					$self->log('register','New user registered.');
-					my $url = $self->{cgi}->url . "?func=register&username=$user&token=$tokennew";
+					#my $url = $self->{cgi}->url . "?func=register&username=$user&token=$tokennew";
 
-					my $body = "Your account has been setup.  To activate your account, click this link - $url\n\nYour password is : $newpass\n\nYou can change the password once you have logged on.";
-					$self->send_email($self->{smtpfrom},$user,"New user Registration",$body);
-					$self->message("Registration token sent.  Please check your email.");
+					my %VARS;
+					# new token set, now main a link to the user
+					$VARS{URL} = $self->{cgi}->url . "?func=register&username=$user2&token=$tokennew";
+					$VARS{BASE} = $self->{cgi}->url;
+					my $msg = $self->{register_template};
+					foreach my $v (keys %VARS)
+					{
+						$msg =~ s/\%$v\%/$VARS{$v}/g;
+					}
+					$self->send_email($self->{register_from},$user2,$self->{register_subject},$msg);
+
+					$self->message($self->{msg_register_token});
 				}
 				else
 				{
-					$self->error("Can not create a registration token");
+					$self->error($self->{msg_token_error});
 				}
-
 			}
 		}
 	}
@@ -554,10 +627,16 @@ sub housekeeping
 	my ($self) = @_;
 
 	# Delete old sessions (at least double the session timeout)
-	$self->{dbh}->do('delete from tbl_session where session_time > date_sub(current_timestamp,INTERVAL " . $self->{timeout} * 2 . " SECOND)');
+	$self->{dbh}->do('delete from tbl_session where session_time < date_sub(current_timestamp,INTERVAL " . $self->{timeout} * 2 . " SECOND)');
 
 	# Delete old session variables
 	$self->{dbh}->do('delete from tbl_session_vars where session not in (select session from tbl_session)');
+
+	# Delete unvalidated user accounts (that was not validated in 24 hours)
+	$self->{dbh}->do('delete from tbl_users where register_timestamp < date_sub(current_timestamp,INTERVAL 24 HOUR) and validate_timestamp is null');
+
+	# Delete log files older than 30 days
+	$self->{dbh}->do('delete from tbl_logs where eventtime < date_sub(current_timestamp,INTERVAL 30 DAY)');
 }
 
 sub generate_token
@@ -596,23 +675,23 @@ sub change_password
 		# are they actually the same
 		if($pass1 ne $pass2)
 		{
-			$self->error("The two passwords do not match.");
+			$self->error($self->{msg_password_match});
 		}
 
 		# is the password strong enough?
 		if(!$self->validate_input('password',$pass1))
 		{
-			$self->error("The password you chose is not strong enough.");
+			$self->error($self->{msg_password_strength});
 		}
 
 		if($self->{dbh}->do("update tbl_users set password = ? where username = ?",undef,$self->encrypt($pass1),$self->{username}))
 		{
 			$self->log('password','User has successfully changed their password');
-			$self->message("Password changed");
+			$self->message($self->{msg_password_success});
 		}
 		else
 		{
-			$self->error("Cannot change password");
+			$self->error($self->{msg_password_error});
 		}
 	}
 }
@@ -690,7 +769,7 @@ sub login
 		{
 			$self->{username} = $user;
 			$self->log('logon','Access denied');
-			$self->error('Access denied');
+			$self->error($self->{msg_access_denied});
 		}
 	}
 }
@@ -711,7 +790,7 @@ sub session_create
 	# and inserting it
 	if(!$sth->execute($self->{username},$self->{session},time))
 	{
-		$self->error("Could not create session");
+		$self->error($self->{msg_session_error});
 	}
 }
 
@@ -747,6 +826,8 @@ sub session_valid
 	{
 		my @ary = $self->xss($sth->fetchrow_array());
 		my $u = $ary[0] ? $ary[0] : '';
+		my $a = $ary[1] ? $ary[1] : 0;
+
 		$sth->finish();
 
 		if($u ne '')
@@ -771,7 +852,7 @@ sub authenticate
 
 		if(crypt($pass,$p) ne $p)
 		{
-			$self->error("Access denied");
+			$self->error($self->{msg_access_denied});
 		}
 
 		if(lc($u) eq lc($user))
@@ -790,7 +871,7 @@ sub authenticate
 				#
 				if(lc($yubi) !~ /^[cbdefghijklnrtuv]{44}$/)
 				{
-					$self->error('You will need your yubikey to authenticate.');
+					$self->error($self->{msg_yubikey_need});
 				}
 				else
 				{
@@ -805,7 +886,7 @@ sub authenticate
 					if($result ne 'OK')
 					{
 						$self->log('yubikey',"The supplied ($id) yubikey did not validate - $result");
-						$self->error("Yubikey access denied - $result");
+						$self->error($self->{msg_access_denied});
 					}
 					else
 					{
@@ -824,7 +905,7 @@ sub authenticate
 							if($y ne $id)
 							{
 								$self->log('yubikey',"Access denied due to unknown yubikey ($id)");
-								$self->error("Access denied - unknown Yubikey");
+								$self->error($self->{msg_access_denied});
 							}
 							else
 							{
@@ -844,7 +925,7 @@ sub authenticate
 	}
 	else
 	{
-		$self->error("Access denied");
+		$self->error($self->{msg_access_denied});
 		return 0;
 	}
 	return 0;
@@ -858,6 +939,7 @@ sub message
 
         print $self->header();
         print $self->{cgi}->h3($text);
+	print $self->funclink('Home','');
         $self->finish();
 
 }
@@ -869,6 +951,7 @@ sub error
 
 	print $self->header();
 	print $self->{cgi}->h3($text);
+	print $self->funclink('Home','');
 	$self->finish();
 }
 
@@ -1061,7 +1144,7 @@ sub form_update
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
 	{
-		$self->error("id was not what we expected");
+		$self->error($self->{msg_invalid_id});
 	}
 
 	my $sql = "update $table set ";
@@ -1114,7 +1197,7 @@ sub form_edit
 
 	if(!$self->validate_input('number',$id))
 	{
-		$self->error("id was not what we expected");
+		$self->error($self->{msg_invalid_id});
 	}
 
 	my $sth = $self->{dbh}->prepare("select * from $table where id = ?");
@@ -1128,7 +1211,7 @@ sub form_edit
 	}
 	else
 	{
-		$self->error("Unable to view id");
+		$self->error($self->{msg_invalid_id});
 	}
 
 }
@@ -1148,7 +1231,7 @@ sub form_delete
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
 	{
-		$self->error("id was not what we expected");
+		$self->error($self->{msg_invalid_id});
 	}
 
 	my $sth = $self->{dbh}->prepare("delete from $table where id = ?");
@@ -1185,7 +1268,11 @@ sub form_insert
 		my $v = $self->param($fn);
 		if(!$self->validate_input($valid,$v))
 		{
-			$self->error("\'$desc\' did not validate ($v).  Expecting it to be a $valid.");
+			my $m = $self->{msg_input_invalid};
+			$m =~ s/\%d/$desc/g;
+			$m =~ s/\%t/$valid/g;
+
+			$self->error($m);
 		}
 
 		if($type =~ /password/i)
@@ -1438,7 +1525,7 @@ sub setup_database
 	#
 	if(!$self->{dbh}->do('select 1 from tbl_users'))
 	{
-		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0,is_admin integer default 0)'))
+		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0,is_admin integer default 0,register_ip varchar(20),register_timestamp datetime,validate_ip varchar(20), validate_timestamp datetime)'))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1446,7 +1533,7 @@ sub setup_database
 		{
 			$self->error($DBI::errstr);
 		}
-		if(!$self->{dbh}->do("insert into tbl_users (username,password,is_admin) values('admin','" . $self->encrypt('password') . "',1)"))
+		if(!$self->{dbh}->do("insert into tbl_users (username,password,is_admin,register_ip,register_timestamp,validate_ip,validate_timestamp) values('admin','" . $self->encrypt('password') . "',1,?,from_unixtime(?))",undef,$ENV{REMOTE_ADDR},time,$ENV{REMOTE_ADDR},time))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1636,6 +1723,114 @@ sub build_post_js
 	return $JS;
 }
 
+sub admin_module
+{
+	my ($self) = @_;
+
+	# == check if the user is an admin
+	if(!$self->is_admin)
+	{
+		$self->error($self->{msg_access_denied});
+	}
+
+	# == if he is, we go on
+
+	# == Define the schema we'll use
+	my $SCHEMA = <<SCHEMA
+username,Email Address,text,20,email
+password,Password,password,20,password
+is_admin,Admin,dropdown,5,number,select 0 union select 1
+SCHEMA
+;
+	if($self->{yubikey} == 1)
+	{
+		$SCHEMA .= "yubikey,Yubikey ID,text,12,text";
+	}
+	my $func = $self->param('func');
+
+	print $self->header();
+	print $self->{cgi}->h2('Admin module');
+
+	print $self->funclink('Home','');
+	print $self->funclink('Logout','logout');
+	print $self->funclink('Change password','password');
+	print $self->funclink('New','adminnew');
+	print $self->funclink('Edit','adminedit');
+	print $self->funclink('Delete','admindelete');
+
+	# ============== Edit functions =========== #
+	if($func eq 'adminedit')
+	{
+		$self->form_list($SCHEMA,"tbl_users","Edit list","username","admineditform","");
+	}
+
+	if($func eq 'admineditform')
+	{
+		$self->form_edit($SCHEMA,"tbl_users","Edit","Edit the entry","admineditit");
+	}
+
+	if($func eq 'admineditit')
+	{
+		if(!$self->form_update($SCHEMA,'tbl_users'))
+		{
+			print "Error updating item -- " . $DBI::errstr;
+		}
+	}
+
+	# ================= Delete functions ================== #
+	if($func eq 'admindelete')
+	{
+		$self->form_list($SCHEMA,"tbl_users","Delete list","username","admindeleteit","");
+	}
+
+	if($func eq 'admindeleteit')
+	{
+		if(!$self->form_delete('tbl_users'))
+		{
+			print "Problem deleting : " . $DBI::errstr;
+		}
+	}
+
+	# =============== New entries ============ #
+
+	if($func eq 'adminnew')
+	{
+		$self->form($SCHEMA,'Create user','admincreate','Create a new user',0,());
+	}
+
+	if($func eq 'admincreate')
+	{
+		if(!$self->form_insert($SCHEMA,'tbl_users',()))
+		{
+			print "Problem creating the user -- " . $DBI::errstr;
+		}
+	}	
+	$self->finish();
+}
+
+=head2 funclink
+
+Instead of using <a href links, call this function instead.  It will embed a proper javascript substitute to ensure no GET urls are posted
+
+input : text, func
+
+=cut
+
+sub funclink
+{
+	my ($self,$txt,$f) = @_;
+
+	my $r = '';
+	if($f eq '' || $f ne $self->param('func'))
+	{
+		$r = $self->{cgi}->a({href=>"javascript:void();", onclick=>"javascript:securefunction(\'$f\');"},$txt);
+	}
+	else
+	{
+		$r = $self->{cgi}->b($txt);
+	}
+	return $r;
+}
 sub validate_input
 {
 	my ($self,$type,$in) = @_;
@@ -1666,6 +1861,22 @@ sub validate_input
 	}
 }
 
+=head2 is_admin
+
+Will advise if the user is an administrator
+
+=cut
+
+sub is_admin
+{
+	my ($self) = @_;
+
+	my $sth = $self->{dbh}->prepare('select is_admin from tbl_users where username = ?');
+	$sth->execute($self->{username});
+	my @ary = $sth->fetchrow_array();
+	$sth->finish();
+	return $ary[0];
+}
 =head1 AUTHOR
 
 Phil Massyn, C<< <phil at massyn.net> >>
@@ -1677,25 +1888,32 @@ Phil Massyn, C<< <phil at massyn.net> >>
 =head2 New features
 * Form list -- allow "next page" if it returns more than ie 30 items on a page
 * Searching of tables
-* Admin module to administer user accounts and reset passwords
-* Customize register and forget emails being sent
 * Authorization module (ie group membership)
 
 =head2 Enhancements
-* Clean up of logs older than 12 months (should be customizable)
 * Ability to record additional fields during registration
 * Form list -- add custom fields (ie add actions like Edit & Delete to it)
 * Change form_* functions to use hashes as inputs, not seperate fields
 * Change dropdown & select to use native CGI parameters
-* Change javascript calls to use native cgi->a calls
-
 
 =head1 REVISION
+0.09	Customize register & forget emails
+	Added msg_* to allow customization of feedback messages
+	Added admin module
+	Added funclink to manage hyperlinks through javascript better
+	Delete accounts not validated within 24 hours as part of housekeeping
+	Clean up of logs older than 30 days in housekeeping
+	Change javascript calls to use native cgi->a calls
+	Added a home link to the error messages
+	Add timestamp, IP and user agent of machines used to create account and validate account for legal requirements
+		- This requires a schema update.  If you had a version prior to 0.09, your database will need to be updated.
+
 0.08	Change order of form_list by clicking headers
 	Create tbl_session_vars table
 	Added session variables through get_variable and set_variable
 	Added housekeeping to remove orphaned table entries
 	Fixed dropdown bug not selecting the right value
+		- This requires a schema update.  If you had a version prior to 0.08, your database will need to be updated.
 
 0.07	Fixed GET blocking not to prevent register and forget from working
 	Added field in database to indicate administrators

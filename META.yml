@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               CGI-AuthenticationFramework
-version:            0.08
+version:            0.09
 abstract:           A CGI authentication framework that utilizes mySQL for the user and session management
 author:
     - Phil Massyn <phil@massyn.net>
