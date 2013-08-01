@@ -19,15 +19,15 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.09
+Version 0.10
 
 =cut
 
-our $VERSION = '0.09';
+our $VERSION = '0.10';
 
 =head1 SYNOPSIS
 
-Allows the login authentication, registration of user accounts, and password reset of webbased users.
+Allows the login authentication, registration of user accounts, and password reset of webbased users.  It also provides a framework for session management, form and list creation, and basic database management, everything you need to build a full web based application.
 
 Sample CGI script :-
 
@@ -57,15 +57,6 @@ Sample CGI script :-
 	# == once we get through that, we can send our headers
 	print $sec->header();
 
-	# == We can call some additional functions
-	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('logout');\">Logout</a>\n";
-	print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('password');\">Change password</a>\n";
-
-	if($sec->is_admin)
-	{
-		print "<a href=\"javascript:void();\" onclick=\"javascript:securefunction('admin');\">Admin</a>\n";
-	}
-	
 	print "<p>\n";
 	print "This is the secret message.<br>\n";
 	print "Email Address is $sec->{username}<br>\n";
@@ -75,7 +66,6 @@ Sample CGI script :-
 	
 	# == when we're done, we call the finish function.  This clears the data connection, and prints the footer code
 	$sec->finish();
-
 
 =head1 FUNCTIONS
 
@@ -194,11 +184,14 @@ sub new
 		die "You did not pass a dbh handle to the authenticator";
 	}
 
+	$self->{title} = $options{title} ? $options{title} : 'Default Application';
+	$self->{style} = $options{style} ? $options{style} : 'style.css';
+
 	# set the default cookie id, or overwrite it if required
 	$self->{cookie} = $options{cookie} ? $options{cookie} : 'my_cookie';
 
 	# set the default header and footer code (if necessary)
-	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html . $self->{cgi}->h1('Default page') . $self->{cgi}->a({href=>$self->{cgi}->url},"Home");
+	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->h1($self->{title});
 	$self->{footer} = $options{footer} ? $options{footer} : $self->{cgi}->hr . $self->{cgi}->i('Powered by Perl') . $self->{cgi}->end_html;
 
 	# set the timeout field
@@ -279,8 +272,6 @@ sub new
 	$self->{msg_account_validated}	= $options{msg_account_validated} ? $options{msg_account_validated} : 'Your account has been validated.  You may now log on.';
 	$self->{msg_account_error}	= $options{msg_account_error}	? $options{msg_account_error} : 'Unable to validate the account';
 
-	
-
 	# Read the cookie
 	my %cookies = fetch CGI::Cookie;
 	if($cookies{$self->{cookie}})
@@ -359,7 +350,10 @@ sub header
 		return;
 	}
 
-	my $cookie = new CGI::Cookie(-name=>$self->{cookie},-value=>$self->{session},-secure=>($ENV{HTTPS}eq 'on' ? 1 : 0));
+	my $ssl = $ENV{HTTPS} ? $ENV{HTTPS} : 'off';
+	my $ssll = $ssl eq 'on' ? 1 : 0;
+
+	my $cookie = new CGI::Cookie(-name=>$self->{cookie},-value=>$self->{session},-secure=>$ssll);
 
 	my %opts;
        	if($opt_ref)
@@ -382,8 +376,47 @@ sub header
         				pre-check=0
         				post-check=0
     				));
-	return CGI::header({%opts}) . $self->{header} . $self->build_post_js("securefunction",$self->{cgi}->url,"","func");
 
+	return CGI::header({%opts}) . $self->{header} . $self->build_post_js("securefunction",$self->{cgi}->url,"","func") . $self->menu_system;
+}
+
+=head2 menu_system
+
+Displays the basic system meny
+
+=cut
+
+sub menu_system
+{
+	my ($self) = @_;
+
+	my $cgi = $self->{cgi};
+
+	my $r = '';
+	if($self->is_admin)
+	{
+		$r .= $cgi->li($self->funclink('Admin','admin'));
+	}
+
+	$r .= $cgi->li($self->funclink('Home',''));
+
+	if($self->{username} eq '')
+	{
+		if($self->{register} == 1)
+		{
+			$r .= $cgi->li($self->funclink('Register','register'));
+		}
+		if($self->{forgot} == 1)
+		{
+			$r .=  $cgi->li($self->funclink('Forgot password','forgot'));
+		}
+	}
+	else
+	{
+		$r .= $cgi->li([$self->funclink('Change Password','password'),$self->funclink('Logout','logout')]);
+	}
+
+	return $cgi->div({class => 'menu_system'},$cgi->ul($r));
 }
 
 sub forgot
@@ -398,7 +431,7 @@ sub forgot
 		return 0;
 	}
 
-	if(!$self->validate_input("md5hex",$token))
+	if($token && !$self->validate_input("md5hex",$token))
 	{
 		return 0;
 	}
@@ -725,15 +758,6 @@ SCHEMA
 		$schema .= "yubiotp,Yubikey,password,50";
 	}
 	$self->form($schema,"Login","login","Login here");
-
-	if($self->{register} == 1)
-	{
-		print $cgi->a({href=>"?func=register"},"Register");
-	}
-	if($self->{forgot} == 1)
-	{
-		print $cgi->a({href=>"?func=forgot"},"Forgot password");
-	}
 }
 
 sub read_login_form
@@ -938,10 +962,8 @@ sub message
         $self->log('message',$text);
 
         print $self->header();
-        print $self->{cgi}->h3($text);
-	print $self->funclink('Home','');
+        print $self->{cgi}->div({class=>'success'},$text);
         $self->finish();
-
 }
 sub error
 {
@@ -950,8 +972,7 @@ sub error
 	$self->log('error',$text);
 
 	print $self->header();
-	print $self->{cgi}->h3($text);
-	print $self->funclink('Home','');
+	print $self->{cgi}->div({class=>'error'},$text);
 	$self->finish();
 }
 
@@ -976,7 +997,7 @@ Generates an HTML form based on a schema
 
 form (schema,submit text,hidden func field,title for the header,captcha option,%VALUES)
 
-=head3 Schema format (field name, description, type, validation, sql)
+=head3 Schema format (field name, description, type, validation, default, sql)
 
 =head4 fieldname
 
@@ -1018,7 +1039,7 @@ sub form
 	foreach my $f (split(/\n/,$schema))
 	{
 		chomp($f);
-		my ($fn,$desc,$type,$size,$validation,$sql) = split(/\,/,$f);
+		my ($fn,$desc,$type,$size,$validation,$required,$default,$sql) = split(/\,/,$f);
 
 		if($fn eq 'id')
 		{
@@ -1027,6 +1048,10 @@ sub form
 
 		my $value = $VALUES{$fn};
 
+		if($value eq '')
+		{
+			$value = $default;
+		}
 		if($type eq 'hidden')
 		{
 			print $cgi->hidden(-name=>$fn,-value=>$value);
@@ -1152,7 +1177,7 @@ sub form_update
 	my @VALUES;
 	foreach my $s (split(/\n/,$schema))
 	{
-		my ($fn,$desc,$type,$sz,$valid,$ddsql) = split(/\,/,$s);
+		my ($fn,$desc,$type,$sz,$valid,$required,$default,$ddsql) = split(/\,/,$s);
 		$sql .= "$fn = ?,";
 
 		my $v = $self->param($fn);
@@ -1259,11 +1284,15 @@ sub form_insert
 	my @fields;
 	my @values1;
 	my @values2;
+
+	push(@fields,'xx_created_by');
+	push(@values2,$self->{username});
+
 	foreach my $s (split(/\n/,$schema))
 	{
 		chomp($s);
 
-		my ($fn,$desc,$type,$sz,$valid,$sql) = split(/\,/,$s);
+		my ($fn,$desc,$type,$sz,$valid,$required,$default,$sql) = split(/\,/,$s);
 
 		my $v = $self->param($fn);
 		if(!$self->validate_input($valid,$v))
@@ -1293,11 +1322,13 @@ sub form_insert
 
 Show the result of a SQL table
 
+input : schema, table, title, linkfield, next func, where, actions
+
 =cut
 
 sub form_list
 {
-	my ($self,$schema,$table,$title,$linkfield,$func,$where) = @_;
+	my ($self,$schema,$table,$title,$linkfield,$func,$where,$actions) = @_;
 
 	my $cgi = $self->{cgi};
 
@@ -1312,7 +1343,7 @@ sub form_list
 	foreach my $s (split(/\n/,$schema))
 	{
 		my ($fn,$de,$ty) = split(/\,/,$s);
-		if($ty ne 'password')
+		if($ty ne 'password' && $ty ne 'textarea')
 		{
 			push(@fields,$fn);
 			push(@desc,$de);
@@ -1339,7 +1370,13 @@ sub form_list
 	# We need to have func the same as the one that got us here, not the one we want to be when we move on from this page
 	print $self->build_post_js("orderform",$self->{cgi}->url,"func=" . $self->param('func') . "&order=$order","field");
 
-	my $orderfield = $self->param('field');
+	foreach my $a (split(/\|/,$actions))
+	{
+		my ($t,$f) = split(/\,/,$a);
+		print $self->build_post_js("actions$f",$self->{cgi}->url,"func=$f","id");
+	}
+
+	my $orderfield = $self->param('field') ? $self->param('field') : 0;
 
 	my $SQLO = '';
 	if($self->validate_input('number',$orderfield))
@@ -1363,11 +1400,11 @@ sub form_list
 	my $AR;
 	if($order == 0)
 	{
-		$AR = "^";
+		$AR = "&#x25B4;";
 	}
 	else
 	{
-		$AR  = "v";
+		$AR  = "&#x25BE;";
 	}
 
 	print $cgi->start_table({border=>1});
@@ -1382,6 +1419,13 @@ sub form_list
 		}
 		print $cgi->th("<a href=\"javascript:void();\" onclick=\"javascript:orderform($c);\">$f</a> $RR");
 		$c++;
+	}
+
+	# do we have any actions ?
+	foreach my $a (split(/\|/,$actions))
+	{
+		my ($t,$f) = split(/\,/,$a);
+		print $cgi->th($t);
 	}
 	print $cgi->end_Tr;
 
@@ -1405,6 +1449,14 @@ sub form_list
 			print $cgi->td($r);
 			$c++;
 		}
+
+		# do we have any actions ?
+		foreach my $a (split(/\|/,$actions))
+		{
+			my ($t,$f) = split(/\,/,$a);
+			print $cgi->td("<a href=\"javascript:void();\" onclick=\"javascript:actions$f($id);\">$t</a>");
+		}
+
 		print $cgi->end_Tr;
 	}
 
@@ -1426,7 +1478,7 @@ sub form_create_table
 	# create the table if it doesn't exist yet
 	if(!$self->{dbh}->do('select 1 from ?',undef,$table))
 	{
-		$self->{dbh}->do("create table $table (id integer auto_increment primary key)");
+		$self->{dbh}->do("create table $table (id integer auto_increment primary key,xx_created_by varchar(200))");
 	}
 
 	# check the fields
@@ -1442,7 +1494,7 @@ sub form_create_table
 
 	foreach my $s (split(/\n/,$schema))
 	{
-		my ($fn,$de,$ty,$sz,$validation,$sql) = split(/\,/,$s);
+		my ($fn,$de,$ty,$sz,$validation,$required,$default,$sql) = split(/\,/,$s);
 		if(!$DB{$fn})
 		{
 			my $sql;
@@ -1464,7 +1516,7 @@ sub param
 {
 	my ($self,$c,$v) = @_;
 
-	my $in = $self->{cgi}->param($c,$v);
+	my $in = $self->{cgi}->param($c,$v) ;
 
 	# strip unsafe characters
 	$in =~ s/[<>\\"\%;\(\)&\0]//g;
@@ -1533,7 +1585,7 @@ sub setup_database
 		{
 			$self->error($DBI::errstr);
 		}
-		if(!$self->{dbh}->do("insert into tbl_users (username,password,is_admin,register_ip,register_timestamp,validate_ip,validate_timestamp) values('admin','" . $self->encrypt('password') . "',1,?,from_unixtime(?))",undef,$ENV{REMOTE_ADDR},time,$ENV{REMOTE_ADDR},time))
+		if(!$self->{dbh}->do("insert into tbl_users (username,password,is_admin,register_ip,register_timestamp,validate_ip,validate_timestamp) values('admin',?,1,?,from_unixtime(?),?,from_unixtime(?))",undef,$self->encrypt('password') , $ENV{REMOTE_ADDR},time,$ENV{REMOTE_ADDR},time))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1739,7 +1791,7 @@ sub admin_module
 	my $SCHEMA = <<SCHEMA
 username,Email Address,text,20,email
 password,Password,password,20,password
-is_admin,Admin,dropdown,5,number,select 0 union select 1
+is_admin,Admin,dropdown,5,number,0,select 0 union select 1
 SCHEMA
 ;
 	if($self->{yubikey} == 1)
@@ -1751,18 +1803,9 @@ SCHEMA
 	print $self->header();
 	print $self->{cgi}->h2('Admin module');
 
-	print $self->funclink('Home','');
-	print $self->funclink('Logout','logout');
-	print $self->funclink('Change password','password');
 	print $self->funclink('New','adminnew');
-	print $self->funclink('Edit','adminedit');
-	print $self->funclink('Delete','admindelete');
 
 	# ============== Edit functions =========== #
-	if($func eq 'adminedit')
-	{
-		$self->form_list($SCHEMA,"tbl_users","Edit list","username","admineditform","");
-	}
 
 	if($func eq 'admineditform')
 	{
@@ -1778,10 +1821,6 @@ SCHEMA
 	}
 
 	# ================= Delete functions ================== #
-	if($func eq 'admindelete')
-	{
-		$self->form_list($SCHEMA,"tbl_users","Delete list","username","admindeleteit","");
-	}
 
 	if($func eq 'admindeleteit')
 	{
@@ -1805,6 +1844,13 @@ SCHEMA
 			print "Problem creating the user -- " . $DBI::errstr;
 		}
 	}	
+
+	# =========== The main list of entries to display
+	if($func eq 'admin' || $func eq 'admincreate' || $func eq 'admindeleteit' || $func eq 'admineditit')
+	{
+		$self->form_list($SCHEMA,"tbl_users","User list","username","admineditform","","Edit,admineditform|Delete,admindeleteit");
+	}
+	
 	$self->finish();
 }
 
@@ -1820,16 +1866,7 @@ sub funclink
 {
 	my ($self,$txt,$f) = @_;
 
-	my $r = '';
-	if($f eq '' || $f ne $self->param('func'))
-	{
-		$r = $self->{cgi}->a({href=>"javascript:void();", onclick=>"javascript:securefunction(\'$f\');"},$txt);
-	}
-	else
-	{
-		$r = $self->{cgi}->b($txt);
-	}
-	return $r;
+	return $self->{cgi}->a({href=>"javascript:void();", onclick=>"javascript:securefunction(\'$f\');"},$txt);
 }
 sub validate_input
 {
@@ -1861,6 +1898,34 @@ sub validate_input
 	}
 }
 
+=head2 schema_dump
+
+Will show a table of the schema (helpful to debug if the schema is buggy)
+
+=cut
+
+sub schema_dump
+{
+	my ($self,$schema) = @_;
+
+	my @heads = ('fieldname','description','type','size','validation','required','default','dropdown sql');
+
+	my $result = $self->{cgi}->start_table({border=>1});
+	$result .= $self->{cgi}->Tr($self->{cgi}->th([@heads]));
+
+	foreach my $f (split(/\n/,$schema))
+	{
+		#my ($fn,$desc,$type,$size,$validation,$required,$default,$sql) = split(/\,/,$f);
+		my @ary = split(/\,/,$f);
+		$result .= $self->{cgi}->Tr($self->{cgi}->td([@ary]));	
+
+	}
+	$result .= $self->{cgi}->end_table;
+
+	return $result;
+
+}
+
 =head2 is_admin
 
 Will advise if the user is an administrator
@@ -1871,12 +1936,23 @@ sub is_admin
 {
 	my ($self) = @_;
 
+	if($self->{username} eq '')
+	{
+		return 0;
+	}
 	my $sth = $self->{dbh}->prepare('select is_admin from tbl_users where username = ?');
 	$sth->execute($self->{username});
 	my @ary = $sth->fetchrow_array();
 	$sth->finish();
 	return $ary[0];
 }
+
+=head1 Additional information
+
+=head2 Using an existing database
+
+All tables need an id field (auto increment primary key), and a varchar of xx_created_by.  The xx_created_by field is populated by the username that created that particular entry.  This is used in scenarios where a filter has to be set on only showing items belonging to the particular user.  See phonebook2.pl for a practical example.
+
 =head1 AUTHOR
 
 Phil Massyn, C<< <phil at massyn.net> >>
@@ -1884,19 +1960,45 @@ Phil Massyn, C<< <phil at massyn.net> >>
 =head1 TODO
 
 =head2 Bugs
+* Check if readonly fields are truely readonly (the hidden field should not pass something to the database)
 
 =head2 New features
+* Add not null to the schema
 * Form list -- allow "next page" if it returns more than ie 30 items on a page
 * Searching of tables
 * Authorization module (ie group membership)
+* Include proper CSS and div tags for full template customization
+* Ability to have a 2nd table list linked to an earlier selection
+* Add a default value to the schema
 
 =head2 Enhancements
+* Process for a lost Yubikey
+* Log which table and ID was changed (not just that the table was changed)
 * Ability to record additional fields during registration
-* Form list -- add custom fields (ie add actions like Edit & Delete to it)
 * Change form_* functions to use hashes as inputs, not seperate fields
 * Change dropdown & select to use native CGI parameters
+* Ability upload files
+* Ability to render files (ie if you upload an image, be able to show it in the browser)
+* Add a workflow example
+
+=head2 Stuff we won't do
+* Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.10	Do not show "textarea" in a list
+	Removed Home link from default header code
+	Added additional actions to form_list
+	Updated phonebook example
+	Fixed bug with default admin user generation
+	Fix admin module to use formlist's new actions feature
+	Added xx_created_by field to all our created tables
+	Added schema_dump procedure to display schemas
+	Started adding some basic style sheet detail (system menu)
+	Added system menu to changing passwords
+	Ability to call is_admin without logged on will not call the database
+	System_menu can detect if a user is logged on, and will show one of two menus
+	Added more css to error and success messages
+
 0.09	Customize register & forget emails
 	Added msg_* to allow customization of feedback messages
 	Added admin module
@@ -1959,14 +2061,6 @@ Phil Massyn, C<< <phil at massyn.net> >>
 	Logging all messages being displayed
 
 0.01	Initial version
-
-=head1 TODO
-
-There is still plenty to do.
-
-=item User lost a yubikey
-
-=item User Administration and user maintenance console
 
 =head1 BUGS
 

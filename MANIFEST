@@ -1,5 +1,6 @@
 sample.pl
 phonebook.pl
+style.css
 Changes
 lib/CGI/AuthenticationFramework.pm
 Makefile.PL

@@ -2,6 +2,8 @@
 
 # Phonebook application built with the CGI::AuthenticationFramework
 
+# In this version, everyone shares the same phone book.  Any change is automatically updated.
+
 use strict;
 use CGI::AuthenticationFramework;
 #do "AuthenticationFramework.pm";
@@ -36,35 +38,28 @@ $sec->secure();
 # == once we get through that, we can send our headers
 print $sec->header();
 
-# == We can call some additional functions
-print $sec->funclink('Logout','logout');
-print $sec->funclink('Change Password','password');
-
-if($sec->is_admin)
-{
-	print $sec->funclink('Admin','admin');
-}
+# == We can also show the system meny
+print $sec->menu_system();
 
 # ============================================ Let's do an actual application ================================= #
 
 # Let's create some menu items
-
 print $sec->funclink('New','new');
-print $sec->funclink('Edit','edit');
-print $sec->funclink('Delete','delete');
 
 # Let's start with the schema.  This is the framework of all the forms we'll use
-# fieldname,description,type,size,validation,dropdown sql
+# fieldname,description,type,size,validation,required,default,dropdown sql
 my $SCHEMA = <<SCHEMA;
-firstname,First name,text,40,text
-lastname,Last name,text,40,text
-email,Email Address,text,50,email
-phoneno,Phone number,text,40,text
-age,Age,text,5,number
-gender,Gender,dropdown,10,text,select 'Male' union select 'Female'
-notes,Notes,textarea,10|10,text
+firstname,First name,text,40,text,yes
+lastname,Last name,text,40,text,yes
+email,Email Address,text,50,email,no
+phoneno,Phone number,text,40,text,yes
+age,Age,text,5,number,yes
+gender,Gender,dropdown,10,text,yes,,select 'Male' union select 'Female'
+notes,Notes,textarea,10|40,text,no,We can have some default information
 SCHEMA
 ;
+
+#print $sec->schema_dump($SCHEMA);
 
 # == define the SQL tablename to use
 my $TABLE = "tbl_phonebook";
@@ -125,15 +120,16 @@ if($func eq 'deleteit')
 
 # -- our main page will show what is on the table, or when we click edit.  We also want to show this after something was edited or deleted
 
-if($func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit')
+if($func eq 'login' || $func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit')
 {
-	$sec->form_list($SCHEMA,$TABLE,"Edit list","firstname","editform","");
+	$sec->form_list($SCHEMA,$TABLE,"Edit list","firstname","editform","","Edit,editform|Delete,deleteit");
 	# - use the schema - $SCHEMA
 	# - on the table - $TABLE
 	# - the title of the page - Edit list
 	# - the field to highlight - firstname
 	# - the name of the func on that link - editform
 	# - the where filter - (currently blank)
+	# - the additional actions (action,func|action2, func2)
 }
 # ============================================================================================================= #
 
