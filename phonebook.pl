@@ -9,6 +9,7 @@ use CGI::AuthenticationFramework;
 #do "AuthenticationFramework.pm";
 use DBI;
 use CGI;
+use CGI::Carp qw(fatalsToBrowser);		# disable when you go live 
 my $cgi = new CGI;
 
 # == connect to the database
@@ -22,9 +23,16 @@ my $sec = CGI::AuthenticationFramework->new(
 	cgi		=> $cgi,
 		# session timeout 
 	timeout 	=> 600,
+		# Customize the look and feel
+	style		=> 'style.css',
+	title		=> 'Phonebook application',
+	footer		=> 'Hello world',
 		# Customize registration emails
 	register 	=> 1,
 	forgot		=> 1,
+	yubikey		=> 0,
+	yubi_id		=> 195,
+	yubi_api	=> '12345',
 	smtpserver 	=> 'mail.tpg.com.au'
 	}
 );
@@ -120,7 +128,7 @@ if($func eq 'deleteit')
 
 # -- our main page will show what is on the table, or when we click edit.  We also want to show this after something was edited or deleted
 
-if($func eq 'login' || $func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit')
+if($func eq 'create' || $func eq 'login' || $func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit')
 {
 	$sec->form_list($SCHEMA,$TABLE,"Edit list","firstname","editform","","Edit,editform|Delete,deleteit");
 	# - use the schema - $SCHEMA
@@ -131,6 +139,7 @@ if($func eq 'login' || $func eq '' || $func eq 'edit' || $func eq 'editit' || $f
 	# - the where filter - (currently blank)
 	# - the additional actions (action,func|action2, func2)
 }
+
 # ============================================================================================================= #
 
 

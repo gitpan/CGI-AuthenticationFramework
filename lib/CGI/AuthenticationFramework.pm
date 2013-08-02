@@ -5,7 +5,7 @@ use strict;
 use warnings;
 use CGI;					# obvious CGI operations
 use CGI::Cookie;				# to handle the cookies
-use CGI::Pretty;
+use CGI::Pretty;				# Let the HTML look nice (but has a performance hit - Disable it when we go live)
 use Digest::MD5  qw(md5 md5_hex md5_base64);	# to encrypt the session key
 use Auth::Yubikey_WebClient;			# for Yubikey support
 use Net::SMTP;					# to send registration & password reminder emails
@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.10
+Version 0.11
 
 =cut
 
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 =head1 SYNOPSIS
 
@@ -191,8 +191,9 @@ sub new
 	$self->{cookie} = $options{cookie} ? $options{cookie} : 'my_cookie';
 
 	# set the default header and footer code (if necessary)
-	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->h1($self->{title});
-	$self->{footer} = $options{footer} ? $options{footer} : $self->{cgi}->hr . $self->{cgi}->i('Powered by Perl') . $self->{cgi}->end_html;
+	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->div({class=>'header'},$self->{title});
+
+	$self->{footer} = $self->{cgi}->div({class=>'footer'},$options{footer} ? $options{footer} : 'Powered by Perl');
 
 	# set the timeout field
 	$self->{timeout} = $options{timeout} ? $options{timeout} : 600;	
@@ -252,6 +253,7 @@ sub new
 	$self->{msg_illegal_content}	= $options{msg_illegal_content} ? $options{msg_illegal_content} : 'Illegal content posted via GET';
 
 	$self->{msg_input_invalid}	= $options{msg_input_invalid} ? $options{msg_input_invalid} : '%d did not validate, because we were expecting %t';
+	$self->{msg_input_required}	= $options{msg_input_required} ? $options{msg_input_required} : '%d can not be blank.  We are expecting %t.';
 	$self->{msg_register_token}	= $options{msg_register_token} ? $options{msg_register_token} : 'Registration token sent.  Please check your email';
 
 	$self->{msg_session_error}	= $options{msg_session_error} ? $options{msg_session_error} : 'Could not create session';
@@ -1059,7 +1061,13 @@ sub form
 		else
 		{
 			print $cgi->start_Tr;
-			print $cgi->th($desc);
+			# Build the required tag
+			my $R = '';
+			if($required =~ /y/i)
+			{
+				$R = $cgi->div({class=>'required'},'*');
+			}
+			print $cgi->th($desc . $R);
 			print $cgi->start_td;
 			if($type eq 'text')
 			{
@@ -1164,7 +1172,7 @@ sub form_update
 {
 	my ($self,$schema,$table) = @_;
 
-	$self->log('update','Editing an entry');
+	$self->log('update','Editing an entry in table ' . $table);
 	
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
@@ -1178,25 +1186,46 @@ sub form_update
 	foreach my $s (split(/\n/,$schema))
 	{
 		my ($fn,$desc,$type,$sz,$valid,$required,$default,$ddsql) = split(/\,/,$s);
-		$sql .= "$fn = ?,";
 
-		my $v = $self->param($fn);
-
-		if($type =~ /password/i)
+		if(lc($type) ne 'readonly')
 		{
-			my $sth = $self->{dbh}->prepare("select $fn from $table where id = ?");
-			$sth->execute($self->param('id'));
-			my ($oldpw) = $sth->fetchrow_array();
-			$sth->finish();
+			$sql .= "$fn = ?,";
 
-			# if the old password in the table is different to the one passed to us, encrypt it
-			if($oldpw ne $v)
+			my $v = $self->param($fn);
+			if($required =~ /y/i && !$v)
 			{
-				$v = $self->encrypt($v);
-			}
-		}
+				my $m = $self->{msg_input_required};
+				$m =~ s/\%d/$desc/g;
+				$m =~ s/\%t/$valid/g;
 
-		push(@VALUES,$v);
+				$self->error($m);			
+			}
+
+			if(!$self->validate_input($valid,$v))
+			{
+				my $m = $self->{msg_input_invalid};
+				$m =~ s/\%d/$desc/g;
+				$m =~ s/\%t/$valid/g;
+
+				$self->error($m);
+			}
+
+			if($type =~ /password/i)
+			{
+				my $sth = $self->{dbh}->prepare("select $fn from $table where id = ?");
+				$sth->execute($self->param('id'));
+				my ($oldpw) = $sth->fetchrow_array();
+				$sth->finish();
+
+				# if the old password in the table is different to the one passed to us, encrypt it
+				if($oldpw ne $v)
+				{
+					$v = $self->encrypt($v);
+				}
+			}
+
+			push(@VALUES,$v);
+		}
 	}
 	$sql =~ s/\,$//g;
 	$sql .= " where id = ?";
@@ -1251,7 +1280,7 @@ sub form_delete
 {
 	my ($self,$table) = @_;
 
-	$self->log('delete','Deleting entry');
+	$self->log('delete','Deleting entry from table ' . $table);
 
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
@@ -1278,7 +1307,7 @@ sub form_insert
 
 	my $dbh = $self->{dbh};
 
-	$self->log('insert','Added an entry');
+	$self->log('insert','Added an entry to table ' . $table);
 	# read the schema, and start constructing the SQL
 
 	my @fields;
@@ -1287,6 +1316,7 @@ sub form_insert
 
 	push(@fields,'xx_created_by');
 	push(@values2,$self->{username});
+	push(@values1,'?');
 
 	foreach my $s (split(/\n/,$schema))
 	{
@@ -1295,6 +1325,14 @@ sub form_insert
 		my ($fn,$desc,$type,$sz,$valid,$required,$default,$sql) = split(/\,/,$s);
 
 		my $v = $self->param($fn);
+		if($required =~ /y/i && !$v)
+		{
+			my $m = $self->{msg_input_required};
+			$m =~ s/\%d/$desc/g;
+			$m =~ s/\%t/$valid/g;
+
+			$self->error($m);			
+		}	
 		if(!$self->validate_input($valid,$v))
 		{
 			my $m = $self->{msg_input_invalid};
@@ -1407,7 +1445,7 @@ sub form_list
 		$AR  = "&#x25BE;";
 	}
 
-	print $cgi->start_table({border=>1});
+	print $cgi->start_table();
 	print $cgi->start_Tr();
 	$c = 0;
 	foreach my $f (@desc)
@@ -1577,7 +1615,7 @@ sub setup_database
 	#
 	if(!$self->{dbh}->do('select 1 from tbl_users'))
 	{
-		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0,is_admin integer default 0,register_ip varchar(20),register_timestamp datetime,validate_ip varchar(20), validate_timestamp datetime)'))
+		if(!$self->{dbh}->do('create table tbl_users (id integer auto_increment primary key,username varchar(200),password varchar(200),yubikey varchar(12),token varchar(200),state integer default 0,is_admin integer default 0,register_ip varchar(20),register_timestamp datetime,validate_ip varchar(20), validate_timestamp datetime,xx_created_by varchar(200))'))
 		{
 			$self->error($DBI::errstr);
 		}
@@ -1789,14 +1827,14 @@ sub admin_module
 
 	# == Define the schema we'll use
 	my $SCHEMA = <<SCHEMA
-username,Email Address,text,20,email
-password,Password,password,20,password
-is_admin,Admin,dropdown,5,number,0,select 0 union select 1
+username,Email Address,text,20,email,yes
+password,Password,password,20,password,yes
+is_admin,Admin,dropdown,5,number,0,no,select 0 union select 1
 SCHEMA
 ;
 	if($self->{yubikey} == 1)
 	{
-		$SCHEMA .= "yubikey,Yubikey ID,text,12,text";
+		$SCHEMA .= "yubikey,Yubikey ID,text,12,yubiid";
 	}
 	my $func = $self->param('func');
 
@@ -1868,6 +1906,7 @@ sub funclink
 
 	return $self->{cgi}->a({href=>"javascript:void();", onclick=>"javascript:securefunction(\'$f\');"},$txt);
 }
+
 sub validate_input
 {
 	my ($self,$type,$in) = @_;
@@ -1892,6 +1931,14 @@ sub validate_input
 	{
 		return 1;
 	}
+	elsif($type eq 'yubikey' && $in =~ /^[cbdefghijklnrtuv]{44}$/)
+	{
+		return 1;
+	}
+	elsif($type eq 'yubiid' && $in =~ /^[cbdefghijklnrtuv]{12}$/)
+	{
+		return 1;
+	}
 	else
 	{
 		return 0;
@@ -1910,7 +1957,7 @@ sub schema_dump
 
 	my @heads = ('fieldname','description','type','size','validation','required','default','dropdown sql');
 
-	my $result = $self->{cgi}->start_table({border=>1});
+	my $result = $self->{cgi}->start_table();
 	$result .= $self->{cgi}->Tr($self->{cgi}->th([@heads]));
 
 	foreach my $f (split(/\n/,$schema))
@@ -1960,20 +2007,18 @@ Phil Massyn, C<< <phil at massyn.net> >>
 =head1 TODO
 
 =head2 Bugs
-* Check if readonly fields are truely readonly (the hidden field should not pass something to the database)
+* none so far
 
 =head2 New features
-* Add not null to the schema
 * Form list -- allow "next page" if it returns more than ie 30 items on a page
 * Searching of tables
 * Authorization module (ie group membership)
 * Include proper CSS and div tags for full template customization
 * Ability to have a 2nd table list linked to an earlier selection
-* Add a default value to the schema
+* Ability to read and search logs
 
 =head2 Enhancements
 * Process for a lost Yubikey
-* Log which table and ID was changed (not just that the table was changed)
 * Ability to record additional fields during registration
 * Change form_* functions to use hashes as inputs, not seperate fields
 * Change dropdown & select to use native CGI parameters
@@ -1985,6 +2030,19 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.11	Fixed bug after adding xx_created_by (did not add ? to  values1)
+	Added required check to sub form, with a corresponding div in the style sheet
+	Added required check to sub form_insert
+	Added input validation to sub form_update
+	Updated logging of update, delete and insert
+	Added yubikey and yubiid as validation inputs
+	Changed admin schema to check yubi id as it's input validation
+	Added xx_created_by to tbl_users (so admin module can edit it)
+	Added header and footer css div tags and style sheets
+	Added common font across css
+	Removed table border from cgi and moved to css
+	Fixed security bug - Removed readonly fields from being passed in form_update fields
+
 0.10	Do not show "textarea" in a list
 	Removed Home link from default header code
 	Added additional actions to form_list
@@ -1998,6 +2056,8 @@ Phil Massyn, C<< <phil at massyn.net> >>
 	Ability to call is_admin without logged on will not call the database
 	System_menu can detect if a user is logged on, and will show one of two menus
 	Added more css to error and success messages
+	Added default value to the schema
+	Added required value to the schema
 
 0.09	Customize register & forget emails
 	Added msg_* to allow customization of feedback messages
