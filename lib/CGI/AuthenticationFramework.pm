@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.11
+Version 0.12
 
 =cut
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 =head1 SYNOPSIS
 
@@ -395,14 +395,16 @@ sub menu_system
 	my $cgi = $self->{cgi};
 
 	my $r = '';
-	if($self->is_admin)
+	my $vs = $self->session_valid();
+
+	if($self->is_admin && $vs && $self->param('func' ne 'logout') )
 	{
 		$r .= $cgi->li($self->funclink('Admin','admin'));
 	}
 
 	$r .= $cgi->li($self->funclink('Home',''));
 
-	if($self->{username} eq '')
+	if(!$vs || $self->param('func') eq 'logout')
 	{
 		if($self->{register} == 1)
 		{
@@ -637,14 +639,15 @@ sub register
 
 					my %VARS;
 					# new token set, now main a link to the user
-					$VARS{URL} = $self->{cgi}->url . "?func=register&username=$user2&token=$tokennew";
+					$VARS{URL} = $self->{cgi}->url . "?func=register&username=$user&token=$tokennew";
 					$VARS{BASE} = $self->{cgi}->url;
 					my $msg = $self->{register_template};
 					foreach my $v (keys %VARS)
 					{
 						$msg =~ s/\%$v\%/$VARS{$v}/g;
 					}
-					$self->send_email($self->{register_from},$user2,$self->{register_subject},$msg);
+
+					$self->send_email($self->{register_from},$user,$self->{register_subject},$msg);
 
 					$self->message($self->{msg_register_token});
 				}
@@ -1706,9 +1709,36 @@ sub generate_password
 	return $pass;
 }
 
+sub send_email_sendmail
+{
+
+        my ($self,$from,$to,$subject,$body) = @_;
+        open (MAIL, "|/usr/sbin/sendmail -t ");
+        print MAIL "From: $from\n";
+        print MAIL "To: $to\n";
+        print MAIL "Content-Type: text/plain\n";
+        print MAIL "Subject: $subject\n\n";
+        print MAIL "$body";
+        close (MAIL);
+}
+	
 sub send_email
 {
         my ($self,$from,$to,$subject,$body) = @_;
+
+	if(-f '/usr/sbin/sendmail')
+	{
+		$self->send_email_sendmail($from,$to,$subject,$body);
+	}
+	else
+	{
+		$self->send_email_smtp($from,$to,$subject,$body);
+	}
+}
+
+sub send_email_smtp
+{
+	my ($self,$from,$to,$subject,$body) = @_;
 
         my $smtp = Net::SMTP->new(
                 $self->{smtpserver},
@@ -1830,6 +1860,7 @@ sub admin_module
 username,Email Address,text,20,email,yes
 password,Password,password,20,password,yes
 is_admin,Admin,dropdown,5,number,0,no,select 0 union select 1
+state,State,readonly,5,number,1,no
 SCHEMA
 ;
 	if($self->{yubikey} == 1)
@@ -2007,7 +2038,7 @@ Phil Massyn, C<< <phil at massyn.net> >>
 =head1 TODO
 
 =head2 Bugs
-* none so far
+* After logging out, the wrong system menus are shown
 
 =head2 New features
 * Form list -- allow "next page" if it returns more than ie 30 items on a page
@@ -2018,6 +2049,7 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Ability to read and search logs
 
 =head2 Enhancements
+* If a user was already registered, but not activated, allow the token to be reset, and sent again
 * Process for a lost Yubikey
 * Ability to record additional fields during registration
 * Change form_* functions to use hashes as inputs, not seperate fields
@@ -2030,6 +2062,10 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.12	Send via /usr/bin/sendmail (if it exists) on Unix boxes instead of Net::SMTP
+	Include state on admin page
+	Fixed user2 vs user bug on the registration page
+
 0.11	Fixed bug after adding xx_created_by (did not add ? to  values1)
 	Added required check to sub form, with a corresponding div in the style sheet
 	Added required check to sub form_insert
