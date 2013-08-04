@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.12
+Version 0.13
 
 =cut
 
-our $VERSION = '0.12';
+our $VERSION = '0.13';
 
 =head1 SYNOPSIS
 
@@ -200,7 +200,7 @@ sub new
 
 	# set the register field
 	$self->{register} = $options{register} ? $options{register} : 0;
-	$self->{register_template} = $options{register_template} ? $options{register_template} : 'Click %URL% to activate your account';
+	$self->{register_template} = $options{register_template} ? $options{register_template} : "Your account was created with an initial password.  Your password : %PASSWORD%\n\nPlease click %URL% to activate your account";
 	$self->{register_subject}  = $options{register_subject}  ? $options{register_subject}  : 'Activate account';
 	$self->{register_from}     = $options{register_from}     ? $options{register_from}     : 'register@localhost';
 
@@ -273,6 +273,7 @@ sub new
 	$self->{msg_account_invalid}	= $options{msg_account_invalid} ? $options{msg_account_invalid} : 'The provided account is not a valid email address';
 	$self->{msg_account_validated}	= $options{msg_account_validated} ? $options{msg_account_validated} : 'Your account has been validated.  You may now log on.';
 	$self->{msg_account_error}	= $options{msg_account_error}	? $options{msg_account_error} : 'Unable to validate the account';
+	$self->{msg_captcha_invalid}	= $options{msg_captcha_invalid}	? $options{msg_captcha_invalid} : 'The catcha you provided did not validate.  Please try this again';
 
 	# Read the cookie
 	my %cookies = fetch CGI::Cookie;
@@ -337,6 +338,30 @@ sub secure
 	}
 }
 
+sub debug
+{
+	my ($self) = @_;
+
+	my $cgi = $self->{cgi};
+
+	print $self->header();
+	print $cgi->h2('Params');
+	print $cgi->start_table();
+	foreach my $p ($cgi->param)
+	{
+		print $cgi->Tr($cgi->th($p),$cgi->td($self->xss($self->param($p))));
+	}
+	print $cgi->end_table();
+
+	print $cgi->h2('Environment');
+	print $cgi->start_table();
+	foreach my $p (sort keys %ENV)
+	{
+		print $cgi->Tr($cgi->th($p),$cgi->td($self->xss($ENV{$p})));
+	}
+	print $cgi->end_table();
+
+}
 =head2 header
 
 Works identical to CGI::header.  The only difference is the adding of a cookie to the header, and passing the header value if defined from the new function.
@@ -397,7 +422,7 @@ sub menu_system
 	my $r = '';
 	my $vs = $self->session_valid();
 
-	if($self->is_admin && $vs && $self->param('func' ne 'logout') )
+	if($self->is_admin && $vs && $self->param('func') ne 'logout' )
 	{
 		$r .= $cgi->li($self->funclink('Admin','admin'));
 	}
@@ -454,6 +479,7 @@ sub forgot
                 # validate if the captcha is ok
                 if(!$self->validate_captcha())
                 {
+			$self->error($self->{msg_captcha_invalid});
                         return 0;
                 }
 
@@ -566,12 +592,6 @@ sub register
 	{
 		# we got a user name...
 
-		# validate if the captcha is ok
-		if(!$self->validate_captcha())
-		{
-			return 0;
-		}
-
 		# is it an actual email address?
 		if(!$self->validate_input('email',$user))
 		{
@@ -580,14 +600,17 @@ sub register
 
 		# do we already have one of these ?
 		my $sth = $self->{dbh}->prepare('select username,token from tbl_users where username = ? and state = 1');
+
 		if($sth->execute($user))
 		{
+
 			my ($user2,$token2) = $self->xss($sth->fetchrow_array());
 			$self->{username} = $user2;
 			$sth->finish();
 
 			if($user2 ne '')
 			{
+
 				if($token2 eq '')
 				{
 					$self->log('register','Account already exists.');
@@ -607,7 +630,6 @@ sub register
 						{
 							return 0;
 						}
-	
 						# Everything checks out... Enable the account
 						my $sth = $self->{dbh}->prepare("update tbl_users set token = '',state = 0,validate_ip = ?, validate_timestamp = from_unixtime(?) where username = ?");
 						if($sth->execute($ENV{REMOTE_ADDR},time,$user2))
@@ -625,9 +647,17 @@ sub register
 			}
 			else
 			{
+
+				# validate if the captcha is ok
+				if(!$self->validate_captcha())
+				{
+					$self->error($self->{msg_captcha_invalid});
+					return 0;
+				}
+
 				# The user does not exist yet
 				my $sth = $self->{dbh}->prepare('insert into tbl_users (username,password,token,state,register_ip,register_timestamp) values(?,?,?,1,?,from_unixtime(?))');
-				
+			
 				my $newpass = $self->generate_password();
 
 				my $tokennew = $self->generate_token();
@@ -641,6 +671,8 @@ sub register
 					# new token set, now main a link to the user
 					$VARS{URL} = $self->{cgi}->url . "?func=register&username=$user&token=$tokennew";
 					$VARS{BASE} = $self->{cgi}->url;
+					$VARS{PASSWORD} = $newpass;
+
 					my $msg = $self->{register_template};
 					foreach my $v (keys %VARS)
 					{
@@ -1077,7 +1109,8 @@ sub form
 				print $cgi->textfield(
 					-name=>$fn,
 		    			-size=>$size,
-					-value=>$value
+					-value=>$value,
+					-autocapitalize=>'none'
 					);
 			}
 			elsif($type eq 'password')
@@ -1193,23 +1226,29 @@ sub form_update
 		if(lc($type) ne 'readonly')
 		{
 			$sql .= "$fn = ?,";
+		
+			my $c = $self->param($fn);			# Content
+			my $v = $self->validate_input($valid,$c);	# Validity
 
-			my $v = $self->param($fn);
-			if($required =~ /y/i && !$v)
+			my $cl = ($c ne '');
+			my $rl = ($required =~ /y/i);
+
+			# Determine the input logic against requred, content and validity
+			if(($cl && $v) || (!$rl && !$cl))
 			{
-				my $m = $self->{msg_input_required};
-				$m =~ s/\%d/$desc/g;
-				$m =~ s/\%t/$valid/g;
-
-				$self->error($m);			
+				# all is ok
 			}
-
-			if(!$self->validate_input($valid,$v))
+			else
 			{
-				my $m = $self->{msg_input_invalid};
+				my $m = '';
+				if($c eq '')
+				{
+					$m = $self->{msg_input_required};
+				}
+				$m = $self->{msg_input_invalid};
 				$m =~ s/\%d/$desc/g;
 				$m =~ s/\%t/$valid/g;
-
+	
 				$self->error($m);
 			}
 
@@ -1221,13 +1260,13 @@ sub form_update
 				$sth->finish();
 
 				# if the old password in the table is different to the one passed to us, encrypt it
-				if($oldpw ne $v)
+				if($oldpw ne $c)
 				{
-					$v = $self->encrypt($v);
+					$c = $self->encrypt($c);
 				}
 			}
 
-			push(@VALUES,$v);
+			push(@VALUES,$c);
 		}
 	}
 	$sql =~ s/\,$//g;
@@ -1327,18 +1366,25 @@ sub form_insert
 
 		my ($fn,$desc,$type,$sz,$valid,$required,$default,$sql) = split(/\,/,$s);
 
-		my $v = $self->param($fn);
-		if($required =~ /y/i && !$v)
-		{
-			my $m = $self->{msg_input_required};
-			$m =~ s/\%d/$desc/g;
-			$m =~ s/\%t/$valid/g;
+		my $c = $self->param($fn);			# Content
+		my $v = $self->validate_input($valid,$c);	# Validity
 
-			$self->error($m);			
-		}	
-		if(!$self->validate_input($valid,$v))
+		my $cl = ($c ne '');
+		my $rl = ($required =~ /y/i);
+
+		# Determine the input logic against requred, content and validity
+		if(($cl && $v) || (!$rl && !$cl))
 		{
-			my $m = $self->{msg_input_invalid};
+			# all is ok
+		}
+		else
+		{
+			my $m = '';
+			if($c eq '')
+			{
+				$m = $self->{msg_input_required};
+			}
+			$m = $self->{msg_input_invalid};
 			$m =~ s/\%d/$desc/g;
 			$m =~ s/\%t/$valid/g;
 
@@ -1347,11 +1393,11 @@ sub form_insert
 
 		if($type =~ /password/i)
 		{
-			$v = $self->encrypt($v);
+			$c = $self->encrypt($c);
 		}
 		push(@fields,$fn);
 		push(@values1,"?");
-		push(@values2,$type eq 'readonly' ? $VALUES{$fn} : $v);
+		push(@values2,$type eq 'readonly' ? $VALUES{$fn} : $c);
 	}
 
 	my $sql = "insert into $table (" . join (",",@fields) . ") values (" . join(",",@values1) . ")";
@@ -2062,6 +2108,11 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.13	Fixed Bug with showing admin menu when a non admin is logged on
+	Fixed logic problem with validity vs required input fields	
+	Fixed a bug with not emailing the registration tokens correctly
+	Prents fields from auto capitalizing on iOS devices
+
 0.12	Send via /usr/bin/sendmail (if it exists) on Unix boxes instead of Net::SMTP
 	Include state on admin page
 	Fixed user2 vs user bug on the registration page

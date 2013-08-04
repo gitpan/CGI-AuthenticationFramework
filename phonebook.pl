@@ -22,6 +22,10 @@ my $sec = CGI::AuthenticationFramework->new(
 	cgi		=> $cgi,
 		# session timeout 
 	timeout 	=> 600,
+		# some customization
+        title           => 'Phonebook example',
+        footer          => 'Example application - do not use for real life situations!',
+	
 		# Customize registration emails
 	register 	=> 1,
 	register_from	=> 'register@mysite.com',
@@ -40,37 +44,26 @@ $sec->secure();
 # == once we get through that, we can send our headers
 print $sec->header();
 
-# == We can call some additional functions
-print $sec->funclink('Logout','logout');
-print $sec->funclink('Change Password','password');
-
-if($sec->is_admin)
-{
-	print $sec->funclink('Admin','admin');
-}
 
 # ============================================ Let's do an actual application ================================= #
 
-# Let's create some menu items
-
 print $sec->funclink('New','new');
-print $sec->funclink('Edit','edit');
-print $sec->funclink('Delete','delete');
 
 # Let's start with the schema.  This is the framework of all the forms we'll use
-# fieldname,description,type,size,validation,dropdown sql
+# fieldname,description,type,size,validation,required,default,dropdown sql
+
 my $SCHEMA = <<SCHEMA;
-firstname,First name,text,40,text
-lastname,Last name,text,40,text
-email,Email Address,text,50,email
-phoneno,Phone number,text,40,text
-age,Age,text,5,number
-gender,Gender,dropdown,10,text,select 'Male' union select 'Female'
-notes,Notes,textarea,10|10,text
+firstname,First name,text,40,text,yes
+lastname,Last name,text,40,text,yes
+email,Email Address,text,50,email,no
+phoneno,Phone number,text,40,text,yes
+age,Age,text,5,number,yes
+gender,Gender,dropdown,10,text,yes,,select 'Male' union select 'Female'
+notes,Notes,textarea,10|40,text,no,We can have some default information
 SCHEMA
 ;
 
-# == define the SQL tablename to use
+# -- define the SQL tablename to use
 my $TABLE = "tbl_phonebook";
 
 # -- is the table created with all the fields?
@@ -129,9 +122,9 @@ if($func eq 'deleteit')
 
 # -- our main page will show what is on the table, or when we click edit.  We also want to show this after something was edited or deleted
 
-if($func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit')
+if($func eq 'login' || $func eq '' || $func eq 'edit' || $func eq 'editit' || $func eq 'deleteit' || $func eq 'create')
 {
-	$sec->form_list($SCHEMA,$TABLE,"Edit list","firstname","editform","");
+	$sec->form_list($SCHEMA,$TABLE,"Phonebook list","firstname","editform","","Edit,editform|Delete,deleteit");
 	# - use the schema - $SCHEMA
 	# - on the table - $TABLE
 	# - the title of the page - Edit list
