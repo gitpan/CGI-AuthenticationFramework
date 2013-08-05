@@ -3,7 +3,8 @@
 # Phonebook application built with the CGI::AuthenticationFramework
 
 use strict;
-use CGI::AuthenticationFramework;
+#use CGI::AuthenticationFramework;
+do "AuthenticationFramework.pm";
 use DBI;
 use CGI;
 my $cgi = new CGI;

@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.13
+Version 0.14
 
 =cut
 
-our $VERSION = '0.13';
+our $VERSION = '0.14';
 
 =head1 SYNOPSIS
 
@@ -194,6 +194,8 @@ sub new
 	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->div({class=>'header'},$self->{title});
 
 	$self->{footer} = $self->{cgi}->div({class=>'footer'},$options{footer} ? $options{footer} : 'Powered by Perl');
+
+	$self->{limit} = $options{limit} ? $options{limit} : 20;
 
 	# set the timeout field
 	$self->{timeout} = $options{timeout} ? $options{timeout} : 600;	
@@ -1445,6 +1447,9 @@ sub form_list
 	print $self->build_post_js("submitform$func",$self->{cgi}->url,"func=$func" ,"id");
 
 	my $order = $self->param('order');
+	my $orderfield = $self->param('field') ? $self->param('field') : 0;
+	my $page = $self->param('page') ? $self->param('page') : 1;
+	
 	if($order == 0)
 	{
 		$order = 1;
@@ -1463,7 +1468,7 @@ sub form_list
 		print $self->build_post_js("actions$f",$self->{cgi}->url,"func=$f","id");
 	}
 
-	my $orderfield = $self->param('field') ? $self->param('field') : 0;
+
 
 	my $SQLO = '';
 	if($self->validate_input('number',$orderfield))
@@ -1485,7 +1490,7 @@ sub form_list
 
 	# Build the arrow to show where we're filtering
 	my $AR;
-	if($order == 0)
+	if($order == 1)
 	{
 		$AR = "&#x25B4;";
 	}
@@ -1496,7 +1501,7 @@ sub form_list
 
 	print $cgi->start_table();
 	print $cgi->start_Tr();
-	$c = 0;
+	$c = 1;
 	foreach my $f (@desc)
 	{
 		my $RR = '';
@@ -1516,7 +1521,11 @@ sub form_list
 	}
 	print $cgi->end_Tr;
 
-	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where $SQLO");
+	# Determine the limit
+	my $LIMIT = " LIMIT " . $self->{limit} * ($page-1) . "," . $self->{limit};
+
+
+	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where $SQLO $LIMIT");
 	$sth->execute();
 	while(my ($id,@ary) = $self->xss($sth->fetchrow_array()))
 	{
@@ -1548,6 +1557,25 @@ sub form_list
 	}
 
 	print $cgi->end_table;
+
+	# Pager code (determining next page, previous page, etc)
+	if($order == 0)
+	{
+		$order = 1;
+	}
+	else
+	{
+		$order = 0;
+	}
+	print $self->build_post_js("pager",$self->{cgi}->url,"func=" . $self->param('func') . "&order=$order&field=$orderfield","page");
+	
+	my $next = $page +1;
+	my $prev = $page - 1;
+	# Refresh code
+	print $cgi->h3("Page $page " .
+		"<a href=\"javascript:void();\" onclick=\"javascript:pager(1);\">&#x21E4;</a>" .
+		"<a href=\"javascript:void();\" onclick=\"javascript:pager($prev);\">&#x2190;</a>" .
+		"<a href=\"javascript:void();\" onclick=\"javascript:pager($next);\">&#x2192;</a>" );
 }
 
 =head2 form_create_table
@@ -2084,10 +2112,8 @@ Phil Massyn, C<< <phil at massyn.net> >>
 =head1 TODO
 
 =head2 Bugs
-* After logging out, the wrong system menus are shown
 
 =head2 New features
-* Form list -- allow "next page" if it returns more than ie 30 items on a page
 * Searching of tables
 * Authorization module (ie group membership)
 * Include proper CSS and div tags for full template customization
@@ -2108,10 +2134,15 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.14	Fixed bug when filtering (sorting field -1)
+	Swapped the arrows around
+	Added list paging
+
 0.13	Fixed Bug with showing admin menu when a non admin is logged on
 	Fixed logic problem with validity vs required input fields	
 	Fixed a bug with not emailing the registration tokens correctly
 	Prents fields from auto capitalizing on iOS devices
+	Fixed showing the wrong menu when user is no longer logged on
 
 0.12	Send via /usr/bin/sendmail (if it exists) on Unix boxes instead of Net::SMTP
 	Include state on admin page
