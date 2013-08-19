@@ -3,7 +3,7 @@ package CGI::AuthenticationFramework;
 use 5.006;
 use strict;
 use warnings;
-use CGI;					# obvious CGI operations
+use CGI qw(:all);				# obvious CGI operations
 use CGI::Cookie;				# to handle the cookies
 use CGI::Pretty;				# Let the HTML look nice (but has a performance hit - Disable it when we go live)
 use Digest::MD5  qw(md5 md5_hex md5_base64);	# to encrypt the session key
@@ -19,11 +19,11 @@ CGI::AuthenticationFramework - A CGI authentication framework that utilizes mySQ
 
 =head1 VERSION
 
-Version 0.14
+Version 0.15
 
 =cut
 
-our $VERSION = '0.14';
+our $VERSION = '0.15';
 
 =head1 SYNOPSIS
 
@@ -191,7 +191,7 @@ sub new
 	$self->{cookie} = $options{cookie} ? $options{cookie} : 'my_cookie';
 
 	# set the default header and footer code (if necessary)
-	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->div({class=>'header'},$self->{title});
+	$self->{header} = $options{header} ? $options{header} : $self->{cgi}->start_html(-head  => meta({-name => 'viewport', -content => 'initial-scale = 1.0,maximum-scale = 1.0'}), -title => $self->{title}, -style=>{'src'=>$self->{style}}) . $self->{cgi}->div({class=>'header'},$self->{title});
 
 	$self->{footer} = $self->{cgi}->div({class=>'footer'},$options{footer} ? $options{footer} : 'Powered by Perl');
 
@@ -382,7 +382,11 @@ sub header
 	my $ssl = $ENV{HTTPS} ? $ENV{HTTPS} : 'off';
 	my $ssll = $ssl eq 'on' ? 1 : 0;
 
-	my $cookie = new CGI::Cookie(-name=>$self->{cookie},-value=>$self->{session},-secure=>$ssll);
+	if(!$self->{session})
+	{
+		$self->{session} = '';
+	}
+	my $cookie = new CGI::Cookie(-httponly => 1,-name=>$self->{cookie},-value=>$self->{session},-secure=>$ssll);
 
 	my %opts;
        	if($opt_ref)
@@ -396,6 +400,7 @@ sub header
 	$opts{Pragma}		= 'no-cache';
 	$opts{Last_Modified}	= strftime('%a, %d %b %Y %H:%M:%S GMT', gmtime);
 	$opts{expires}		= 'Sat, 26 Jul 1997 05:00:00 GMT';
+	$opts{'X-Frame-Options'}	= 'deny';
 	$opts{Cache_Control}	= join(', ', qw(
         				private
         				no-cache
@@ -1070,7 +1075,7 @@ sub form
 	
 	my $cgi = $self->{cgi};
 
-	print $cgi->h2($title);
+	print $cgi->div({class=>'title'},$title);
 	print $cgi->start_form({-action=>$cgi->url,-autocomplete=>"off"});;
 	print $cgi->start_table;
 
@@ -1202,13 +1207,13 @@ sub xss
 
 Updates the data in the table 
 
-input : schema, table name
+input : schema, table name, where
 
 =cut
 
 sub form_update
 {
-	my ($self,$schema,$table) = @_;
+	my ($self,$schema,$table,$where) = @_;
 
 	$self->log('update','Editing an entry in table ' . $table);
 	
@@ -1271,8 +1276,12 @@ sub form_update
 			push(@VALUES,$c);
 		}
 	}
+	if($where ne '')
+	{
+		$where = " where $where";
+	}
 	$sql =~ s/\,$//g;
-	$sql .= " where id = ?";
+	$sql .= " where id = ?$where";
 
 	my $sth = $self->{dbh}->prepare($sql);
 
@@ -1283,13 +1292,13 @@ sub form_update
 
 Shows the edit form after an id was passed to it
 
-input : schema, table, title, button text, func field
+input : schema, table, title, button text, func field, where
 
 =cut
 
 sub form_edit
 {
-	my ($self,$schema,$table,$title,$button,$func) = @_;
+	my ($self,$schema,$table,$title,$button,$func,$where) = @_;
 
 	my $id = $self->param('id');
 
@@ -1297,8 +1306,11 @@ sub form_edit
 	{
 		$self->error($self->{msg_invalid_id});
 	}
-
-	my $sth = $self->{dbh}->prepare("select * from $table where id = ?");
+	if($where ne '')
+	{
+		$where = "and $where";
+	}
+	my $sth = $self->{dbh}->prepare("select * from $table where id = ?$where");
 
 	if($sth->execute($id))
 	{
@@ -1318,13 +1330,20 @@ sub form_edit
 
 Deletes the entry from the table
 
+input : table, where
+
 =cut
 
 sub form_delete
 {
-	my ($self,$table) = @_;
+	my ($self,$table,$where) = @_;
 
 	$self->log('delete','Deleting entry from table ' . $table);
+
+	if($where ne '')
+	{
+		$where = " and $where";
+	}
 
 	my $id = $self->param('id');
 	if(!$self->validate_input('number',$id))
@@ -1332,7 +1351,7 @@ sub form_delete
 		$self->error($self->{msg_invalid_id});
 	}
 
-	my $sth = $self->{dbh}->prepare("delete from $table where id = ?");
+	my $sth = $self->{dbh}->prepare("delete from $table where id = ?$where");
 
 	return $sth->execute($id);
 }
@@ -1421,7 +1440,7 @@ sub form_list
 
 	my $cgi = $self->{cgi};
 
-	print $cgi->h2($title);
+	print $cgi->div({class=>'title',},$title);
 	my @fields;
 	my @desc;
 
@@ -1524,7 +1543,10 @@ sub form_list
 	# Determine the limit
 	my $LIMIT = " LIMIT " . $self->{limit} * ($page-1) . "," . $self->{limit};
 
-
+	if($where ne '')
+	{
+		$where = "where $where";
+	}
 	my $sth = $self->{dbh}->prepare('select ' . join(',',@fields) . " from $table $where $SQLO $LIMIT");
 	$sth->execute();
 	while(my ($id,@ary) = $self->xss($sth->fetchrow_array()))
@@ -1572,7 +1594,7 @@ sub form_list
 	my $next = $page +1;
 	my $prev = $page - 1;
 	# Refresh code
-	print $cgi->h3("Page $page " .
+	print $cgi->div({class=>'pager'},"Page $page " .
 		"<a href=\"javascript:void();\" onclick=\"javascript:pager(1);\">&#x21E4;</a>" .
 		"<a href=\"javascript:void();\" onclick=\"javascript:pager($prev);\">&#x2190;</a>" .
 		"<a href=\"javascript:void();\" onclick=\"javascript:pager($next);\">&#x2192;</a>" );
@@ -1933,8 +1955,8 @@ sub admin_module
 	my $SCHEMA = <<SCHEMA
 username,Email Address,text,20,email,yes
 password,Password,password,20,password,yes
-is_admin,Admin,dropdown,5,number,0,no,select 0 union select 1
-state,State,readonly,5,number,1,no
+is_admin,Admin,dropdown,5,number,no,0,select 0 union select 1
+state,State,readonly,5,number,no,0
 SCHEMA
 ;
 	if($self->{yubikey} == 1)
@@ -1944,7 +1966,7 @@ SCHEMA
 	my $func = $self->param('func');
 
 	print $self->header();
-	print $self->{cgi}->h2('Admin module');
+	print $self->{cgi}->div({class=>'maintitle'},'Admin module');
 
 	print $self->funclink('New','adminnew');
 
@@ -2050,6 +2072,74 @@ sub validate_input
 	}
 }
 
+=head2 wrapper
+
+Wrapper module
+
+input : schema, func prefix, table
+
+=cut
+
+sub wrapper
+{
+	my ($self,$SCHEMA,$func2,$TABLE) = @_;
+
+	my $func = $self->param('func');
+
+	if($func =~ /$func2/)
+	{
+		# -- is the table created with all the fields?
+		$self->form_create_table($SCHEMA,$TABLE);
+
+		print $self->funclink('New',"${func2}new");
+		
+		if($func eq "${func2}editform")
+		{
+			$self->form_edit($SCHEMA,$TABLE,"Edit","Edit the entry","${func2}editit");
+		}
+
+		if($func eq "${func2}editit")
+		{
+			if(!$self->form_update($SCHEMA,$TABLE))
+			{
+				print "Error updating item -- " . $DBI::errstr;
+			}
+		}
+
+		if($func eq "${func2}new")
+		{
+			$self->form($SCHEMA,'Create user',"${func2}create",'Create a new user',0,());
+		}
+
+		if($func eq "${func2}create")
+		{
+			if(!$self->form_insert($SCHEMA,$TABLE,()))
+			{
+				print "Problem creating the entry -- " . $DBI::errstr;
+			}
+		}
+
+		# == Deleting entries
+		if($func eq "${func2}delete")
+		{
+			$self->form_list($SCHEMA,$TABLE,"Delete list","firstname","${func2}deleteit","");
+		}
+
+		if($func eq "${func2}deleteit")
+		{
+			if(!$self->form_delete($TABLE))
+			{
+				print "Problem deleting : " . $DBI::errstr;
+			}
+		}
+
+		if($func eq $func2 || $func eq "${func2}edit" || $func eq "${func2}editit" || $func eq "${func2}deleteit" || $func eq "${func2}create")
+		{
+			$self->form_list($SCHEMA,$TABLE,"Phonebook list","firstname","${func2}editform","","Edit,${func2}editform|Delete,${func2}deleteit");
+		}
+
+	}
+}
 =head2 schema_dump
 
 Will show a table of the schema (helpful to debug if the schema is buggy)
@@ -2134,6 +2224,15 @@ Phil Massyn, C<< <phil at massyn.net> >>
 * Split the module into smaller files (because when I run the code on GoDaddy, it becomes a mess to cross reference)
 
 =head1 REVISION
+0.15	Added viewport (for iPhone use)
+	Created a wrapper procedure
+	Security fix - cookie set to httponly
+	Bug with state when manually adding new users
+	Added where fields to all major data modules
+	Created phonebook2 example (using the same table for multiple users with seperate information)
+	Added additional css (maintitle, title)
+	Added X-frame-options to prevent clickjacking
+
 0.14	Fixed bug when filtering (sorting field -1)
 	Swapped the arrows around
 	Added list paging

@@ -15,9 +15,10 @@ div.header {
 div.footer {
 	font-size:10px;
 	color:#3232d2;
-	position: absolute;
+	position: absolute float;
 	bottom: 0px;
 }
+
 /* menu for the system*/
 
 div.menu_system {
@@ -105,14 +106,37 @@ th {
 	font-weight:bold;
 }
 
+/* Pager */
+div.pager
+	{
+		font-size:30px;
+		color:#ffff00;
+	}
+/* Titles */
+div.title {
+	font-size: 30px;
+	font-weight:bold;
+	color:#ff0000;
+}
+
+div.maintitle {
+	font-size: 20px;
+	font-weight: bold;
+	background-color:#00ffff;
+	position:absolute;
+	left:50%;
+	top:0;
+}
 /* Experimenting with making an iPhone version of the code */
 
 @media screen and (max-device-width: 480px){
-    div.menu_system a:link,div.menu_system a:visited {
-		font-size:60px;
+    div.menu_system a:link,div.menu_system a:visited 
+    	{
+		font-size:10px;
 	}
-	div.menu_system a {
-		width:200px;
+	div.menu_system a 
+	{
+		width:60px;
 	}
 }
 
